@@ -3,5 +3,6 @@
 if(DEFINED ENV{DOGFIGHT_PROBE})
     idf_component_register(SRCS "tools/button_discovery.c" INCLUDE_DIRS ".")
 else()
-    idf_component_register(SRCS "main.c" "hud.c" "link.c" "controller.c" INCLUDE_DIRS ".")
+    idf_component_register(SRCS "main.c" "hud.c" "link.c" "controller.c" "net.c"
+                           INCLUDE_DIRS ".")
 endif()

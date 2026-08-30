@@ -13,6 +13,7 @@
 #include "controller.h"
 #include "hud.h"
 #include "link.h"
+#include "net.h"
 
 static hud_state_t s_panel = {
     .hull = 100, .wing_l = 100, .wing_r = 100, .speed = 0,
@@ -33,10 +34,39 @@ static void assign(const char *key, const char *value)
     // before the firmware knows about them without bricking the panel.
 }
 
+// "!wifi ssid=NAME pass=SECRET". Neither value may contain a space, which is
+// the price of a one-line command typed at a serial port instead of a captive
+// portal nobody wants to build twice.
+static void set_wifi(const char *args)
+{
+    char ssid[33] = {0}, password[65] = {0};
+    char buffer[160];
+    snprintf(buffer, sizeof(buffer), "%s", args);
+
+    char *save = NULL;
+    for (char *token = strtok_r(buffer, " ", &save); token; token = strtok_r(NULL, " ", &save)) {
+        char *equals = strchr(token, '=');
+        if (!equals) continue;
+        *equals = '\0';
+        if (!strcmp(token, "ssid")) snprintf(ssid, sizeof(ssid), "%s", equals + 1);
+        else if (!strcmp(token, "pass")) snprintf(password, sizeof(password), "%s", equals + 1);
+    }
+
+    if (ssid[0] == '\0') {
+        link_sendf("#net usage: !wifi ssid=NAME pass=SECRET");
+        return;
+    }
+    net_set_credentials(ssid, password);
+}
+
 // "!hud hp=87 wl=40 gl=CANNON al=120 ..." — every field optional, so the host
 // may send only what changed.
 static void host_said(const char *line)
 {
+    if (strncmp(line, "!wifi ", 6) == 0) {
+        set_wifi(line + 6);
+        return;
+    }
     if (strncmp(line, "!hud ", 5) != 0) return;
 
     char buffer[256];
@@ -66,4 +96,5 @@ void app_main(void)
     hud_set(&s_panel);
 
     ESP_ERROR_CHECK(controller_start());
+    ESP_ERROR_CHECK(net_start());
 }

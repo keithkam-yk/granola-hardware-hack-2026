@@ -6,3 +6,4 @@ __pycache__/
 managed_components/
 dependencies.lock
 host/captures/
+.claude/worktrees/

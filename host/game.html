@@ -1,0 +1,121 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Dogfight controllers</title>
+<style>
+  :root { color-scheme: dark; }
+  body {
+    margin: 0; padding: 24px; background: #05070a; color: #e8edf4;
+    font: 15px/1.5 ui-sans-serif, system-ui, -apple-system, sans-serif;
+  }
+  h1 { font-size: 18px; font-weight: 600; margin: 0 0 4px; letter-spacing: .02em; }
+  .hint { color: #6a7686; margin: 0 0 24px; }
+  .player {
+    border: 1px solid #1d2732; border-radius: 12px; background: #0b1017;
+    padding: 18px 20px; margin-bottom: 16px; max-width: 720px;
+  }
+  .name { font-weight: 600; }
+  .meta { color: #6a7686; font-variant-numeric: tabular-nums; }
+  .axis { display: grid; grid-template-columns: 64px 1fr 64px; align-items: center; gap: 12px; margin-top: 10px; }
+  .track { height: 10px; border-radius: 5px; background: #121820; position: relative; }
+  .fill { position: absolute; top: 0; bottom: 0; background: #35d07f; border-radius: 5px; }
+  .value { text-align: right; font-variant-numeric: tabular-nums; color: #6a7686; }
+  .triggers { display: flex; gap: 12px; margin-top: 16px; }
+  .trigger {
+    flex: 1; text-align: center; padding: 12px; border-radius: 8px;
+    background: #121820; border: 1px solid #1d2732; font-weight: 600; letter-spacing: .08em;
+  }
+  .trigger.on { background: #35d07f; border-color: #35d07f; color: #05070a; }
+  .empty { color: #6a7686; }
+  button {
+    margin-top: 16px; padding: 8px 14px; border-radius: 8px; cursor: pointer;
+    background: #121820; color: #e8edf4; border: 1px solid #2c3a4a; font: inherit;
+  }
+</style>
+
+<h1>Dogfight controllers</h1>
+<p class="hint">Link check, not the game. Tilt a board and its bars move; press a trigger and it lights.
+   The panel test pushes damage back down to that board's screen.</p>
+<div id="players"><p class="empty">Waiting for a controller to find this host…</p></div>
+
+<script>
+// Roll and pitch straight off gravity. Good enough to prove a link end to end;
+// the game views run a real orientation filter instead.
+function attitude(sample, accelScale) {
+  const [ax, ay, az] = sample.slice(2, 5).map(v => v * accelScale);
+  return {
+    roll: Math.atan2(ay, az) * 180 / Math.PI,
+    pitch: Math.atan2(-ax, Math.hypot(ay, az)) * 180 / Math.PI,
+  };
+}
+
+const cards = new Map();
+
+function card(name) {
+  if (cards.has(name)) return cards.get(name);
+
+  const root = document.createElement('div');
+  root.className = 'player';
+  root.innerHTML = `
+    <div><span class="name"></span> <span class="meta"></span></div>
+    <div class="axis"><span>roll</span><div class="track"><div class="fill" data-roll></div></div><span class="value" data-roll-v>0°</span></div>
+    <div class="axis"><span>pitch</span><div class="track"><div class="fill" data-pitch></div></div><span class="value" data-pitch-v>0°</span></div>
+    <div class="triggers"><div class="trigger" data-left>BOOT</div><div class="trigger" data-right>PWR</div></div>
+    <button>Send a panel test</button>`;
+  root.querySelector('.name').textContent = name;
+  const list = document.getElementById('players');
+  list.querySelector('.empty')?.remove();
+  list.append(root);
+
+  const entry = {
+    root,
+    meta: root.querySelector('.meta'),
+    left: root.querySelector('[data-left]'),
+    right: root.querySelector('[data-right]'),
+    rollFill: root.querySelector('[data-roll]'),
+    pitchFill: root.querySelector('[data-pitch]'),
+    rollValue: root.querySelector('[data-roll-v]'),
+    pitchValue: root.querySelector('[data-pitch-v]'),
+    index: cards.size,
+  };
+  root.querySelector('button').onclick = () => fetch('/', {
+    method: 'POST',
+    body: JSON.stringify({
+      player: entry.index,
+      hp: 42, wl: 18, wr: 95, spd: 310,
+      gl: 'CANNON', al: 120, gr: 'MISSILE', ar: 4,
+    }),
+  });
+
+  cards.set(name, entry);
+  return entry;
+}
+
+// A signed angle drawn from the centre, so level reads as nothing and a hard
+// bank reads as a wide bar on the side you are banking towards.
+function setAxis(fill, value, degrees, limit = 90) {
+  const clamped = Math.max(-limit, Math.min(limit, degrees));
+  const half = Math.abs(clamped) / limit * 50;
+  fill.style.left = (clamped < 0 ? 50 - half : 50) + '%';
+  fill.style.width = half + '%';
+  value.textContent = Math.round(degrees) + '°';
+}
+
+new EventSource('/stream').onmessage = event => {
+  for (const player of JSON.parse(event.data).players) {
+    const view = card(player.name);
+    const last = player.samples.at(-1);
+    if (!last) continue;
+
+    const scale = player.header.acc_scale_g || 8 / 32768;
+    const { roll, pitch } = attitude(last, scale);
+    setAxis(view.rollFill, view.rollValue, roll);
+    setAxis(view.pitchFill, view.pitchValue, pitch);
+
+    view.left.classList.toggle('on', last[8] === 1);
+    view.right.classList.toggle('on', last[9] === 1);
+    view.meta.textContent =
+      `${player.header.rate_hz || '?'} Hz · ${player.dropped} dropped · seq ${last[0]}`;
+  }
+};
+</script>
