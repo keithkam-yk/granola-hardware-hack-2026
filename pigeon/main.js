@@ -156,7 +156,10 @@ function wingGeometry() {
   shape.bezierCurveTo(-0.045, 0.23, -0.062, 0.12, -0.065, 0);     // trailing edge
   shape.lineTo(0.070, 0);
   const geometry = new ExtrudeGeometry(shape, { depth: 0.006, bevelEnabled: false });
-  geometry.rotateX(-Math.PI / 2);   // lay the planform flat, span along +Z
+  // +X/2, not -X/2: the shape's span runs up its own +Y, and rotating the other
+  // way sent it down -Z, so every wing reached across the body and out the far
+  // side. Mirrored for the second wing, that read as the two of them crossing.
+  geometry.rotateX(Math.PI / 2);    // lay the planform flat, span along +Z
   return geometry;
 }
 
@@ -677,7 +680,10 @@ function update(dt) {
   // dihedral, where a coasting pigeon actually holds them.
   const stroke = state.stroke < 1 ? Math.sin(state.stroke * Math.PI) : 0;
   for (const { pivot, side } of bird.wings) {
-    pivot.rotation.x = side * (stroke * 1.55 - 0.10);
+    // Stops at 50 degrees below the shoulder. The old 83 swept both tips in
+    // under the belly until they were 17cm apart against a 66cm span, which
+    // read as the wings crossing rather than beating.
+    pivot.rotation.x = side * (stroke * 1.05 - 0.18);
   }
 
   // Chase camera, lagged. It looks where the pointer looks, not where the bird
