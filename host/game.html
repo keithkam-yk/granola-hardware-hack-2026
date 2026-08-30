@@ -73,29 +73,54 @@ function unit(a) {
   return scale(a, 1 / length);
 }
 
-// Taking each axis from the difference between its two extremes doubles the
-// signal and cancels whatever the level pose was not quite level about.
-function frameFrom(poses) {
-  const up = unit(poses.level);
-  const flatten = v => {
-    const flat = sub(v, scale(up, dot(v, up)));
-    return unit(flat);
-  };
-  const right = flatten(sub(poses.right, poses.left));
-  const pitched = flatten(sub(poses.up, poses.down));
-  // Keep pitch independent of roll even if the demonstrated poses were not
-  // perpendicular to each other, which by hand they never are.
-  const forward = unit(sub(pitched, scale(right, dot(pitched, right))));
-  return { up, right, forward };
+const angle = value => Math.asin(Math.max(-1, Math.min(1, value))) * 180 / Math.PI;
+
+// Which axis is which, and how the pilot happens to hold it, are different
+// kinds of thing and are stored separately.
+//
+// The mapping is discrete: this chip measured 0.998, 0.997 and 0.996 along
+// single axes, so it is mounted square and the frame is snapped to whole
+// numbers rather than carrying someone's wrist angle as if it were geometry.
+//
+// The leftover few degrees are that wrist angle, and they are kept as trim.
+// Rounding them away instead would leave the stick reading three degrees at
+// rest, which is a plane that turns slowly while you sit still.
+function snap(axis) {
+  let biggest = 0;
+  for (let i = 1; i < 3; i++) if (Math.abs(axis[i]) > Math.abs(axis[biggest])) biggest = i;
+  const whole = [0, 0, 0];
+  whole[biggest] = Math.sign(axis[biggest]);
+  return whole;
 }
 
-const angle = value => Math.asin(Math.max(-1, Math.min(1, value))) * 180 / Math.PI;
+function frameFrom(poses) {
+  const level = unit(poses.level);
+  const flatten = v => {
+    const flat = sub(v, scale(level, dot(v, level)));
+    return unit(flat);
+  };
+  const measuredRight = flatten(sub(poses.right, poses.left));
+  const pitched = flatten(sub(poses.up, poses.down));
+  // Keep pitch independent of roll even though poses held by hand never are.
+  const measuredForward = unit(sub(pitched, scale(measuredRight, dot(pitched, measuredRight))));
+
+  const right = snap(measuredRight);
+  const forward = snap(measuredForward);
+  return {
+    up: snap(level),
+    right,
+    forward,
+    trim: { roll: angle(dot(level, right)), pitch: angle(dot(level, forward)) },
+  };
+}
+
 
 function attitude(sample, frame) {
   const gravity = unit([sample[2], sample[3], sample[4]]);
+  const trim = frame.trim || { roll: 0, pitch: 0 };
   return {
-    roll: angle(dot(gravity, frame.right)),
-    pitch: angle(dot(gravity, frame.forward)),
+    roll: angle(dot(gravity, frame.right)) - trim.roll,
+    pitch: angle(dot(gravity, frame.forward)) - trim.pitch,
   };
 }
 
