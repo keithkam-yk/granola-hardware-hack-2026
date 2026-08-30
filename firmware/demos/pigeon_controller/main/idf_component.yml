@@ -1,0 +1,7 @@
+dependencies:
+  idf: ">=5.3"
+  lvgl/lvgl: "^9.2"
+  # Owns the CO5300 panel and the touch controller, and picks the right driver
+  # for the board revision from the touch chip it finds. Hand-rolling this panel
+  # config is the mistake that cost the sibling board two days.
+  waveshare/esp32_s3_touch_amoled_1_8: "^2.0.3"
