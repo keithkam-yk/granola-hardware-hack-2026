@@ -86,7 +86,7 @@ const TUNE = {
   staminaMax: 100, staminaPerBeat: 2.6, staminaRegen: 3.1,
 
   turnRate: 1.7,          // rad/s the heading chases the pointer
-  boardTurn: 2.2,         // rad/s of yaw at full tilt on the board
+  boardTurn: 1.0,         // rad/s of yaw at full tilt on the board
   bankPerTurn: 1.0,
   // A third of a metre of bird wants the camera close. This is most of why the
   // old build felt slow: speed is only ever read against something you know the
@@ -286,13 +286,17 @@ function headingVector() {
 // the defaults: pressing C stores whatever pose the board is actually in.
 const LEVEL_DEFAULT = [0, 0, -1];
 const SCREEN_RIGHT = [1, 0, 0];
-const TILT_SPAN = 38;                // degrees of tilt for full deflection
+// Degrees of tilt for full deflection. Doubled from 38: a bird held in the hand
+// is not a mouse, and half a wrist's worth of movement was reaching the stops.
+const TILT_SPAN = 80;
 
 // Tilt the board back and the bird climbs, like pulling a stick. The measured
 // frame reports that as a negative angle, so it is flipped here rather than by
 // quietly reordering the cross product — one constant, one character to change
 // if it turns out to read backwards in the hand.
-const BOARD_PITCH_SIGN = -1;
+// Tilt forward to dive, back to climb. Flipped from -1 after flying it: the
+// measured frame's sign read backwards in the hand.
+const BOARD_PITCH_SIGN = 1;
 const BOARD_ROLL_SIGN = 1;
 
 const dot3 = (a, b) => a[0]*b[0] + a[1]*b[1] + a[2]*b[2];
@@ -493,7 +497,7 @@ function update(dt) {
     (state.speed - TUNE.speedStall) / (TUNE.speedBestGlide - TUNE.speedStall), 0, 1);
   // The board's tilt outranks the pointer whenever a board is connected, so a
   // controller and a mouse never fight over the same bird.
-  const pitchInput = board.live ? board.pitch * 0.85 : look.pitch;
+  const pitchInput = board.live ? board.pitch * 0.45 : look.pitch;
   const asked = pitchInput * 0.85 * (pitchInput > 0 ? margin * margin : 1);
   const wanted = MathUtils.clamp(trim + asked, -1.35, TUNE.trimMax + 0.35);
   state.gamma += (wanted - state.gamma) * (1 - Math.exp(-dt / 0.16));
