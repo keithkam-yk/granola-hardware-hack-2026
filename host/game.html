@@ -9,13 +9,20 @@
     font: 15px/1.5 ui-sans-serif, system-ui, -apple-system, sans-serif;
   }
   h1 { font-size: 18px; font-weight: 600; margin: 0 0 4px; letter-spacing: .02em; }
-  .hint { color: #6a7686; margin: 0 0 24px; }
+  .hint { color: #6a7686; margin: 0 0 24px; max-width: 720px; }
   .player {
     border: 1px solid #1d2732; border-radius: 12px; background: #0b1017;
     padding: 18px 20px; margin-bottom: 16px; max-width: 720px;
   }
   .name { font-weight: 600; }
-  .meta { color: #6a7686; font-variant-numeric: tabular-nums; }
+  .meta { color: #6a7686; font-variant-numeric: tabular-nums; font-size: 13px; }
+  .calibrate {
+    margin: 14px 0; padding: 14px 16px; border-radius: 10px;
+    background: #17212e; border: 1px solid #2c3a4a;
+  }
+  .calibrate.done { background: #0f1a14; border-color: #1f3d2c; color: #6a7686; }
+  .step { font-size: 17px; font-weight: 600; }
+  .step em { font-style: normal; color: #35d07f; }
   .axis { display: grid; grid-template-columns: 64px 1fr 64px; align-items: center; gap: 12px; margin-top: 10px; }
   .track { height: 10px; border-radius: 5px; background: #121820; position: relative; }
   .fill { position: absolute; top: 0; bottom: 0; background: #35d07f; border-radius: 5px; }
@@ -28,67 +35,72 @@
   .trigger.on { background: #35d07f; border-color: #35d07f; color: #05070a; }
   .empty { color: #6a7686; }
   button {
-    margin-top: 16px; padding: 8px 14px; border-radius: 8px; cursor: pointer;
+    margin-top: 16px; margin-right: 8px; padding: 8px 14px; border-radius: 8px; cursor: pointer;
     background: #121820; color: #e8edf4; border: 1px solid #2c3a4a; font: inherit;
   }
 </style>
 
 <h1>Dogfight controllers</h1>
-<p class="hint">Link check, not the game. Tilt a board and its bars move; press a trigger and it lights.
-   <strong>Hold both triggers at once to centre</strong> — whatever pose the board is in becomes level,
-   so you never have to reach for the laptop while flying.
-   The panel test pushes damage back down to that board's screen.</p>
-<div id="players"><p class="empty">Waiting for a controller to find this host…</p></div>
+<p class="hint">Link check and stick calibration. Hold each pose and press <strong>BOOT</strong>.
+   Both triggers together starts over.</p>
+<div id="players"><p class="empty">Waiting for a controller to find this host&hellip;</p></div>
 
 <script>
-// Attitude relative to a reference pose rather than to a hardcoded axis frame.
+// Calibration by demonstration.
 //
-// Twice I derived which device axis points up from how the panel is rotated,
-// and twice it was wrong — the second time inverted, which is what made roll
-// snap between +180 and -180. Measured: held in the flying position this IMU
-// reads ax = -0.88, so screen-up is -ax. That constant is now only the default;
-// pressing Centre replaces it with wherever the board actually is, so how you
-// choose to hold it stops being something anyone has to get right.
+// Three attempts to derive the axis frame from the panel's 270 degree rotation
+// were all wrong, and the reason is structural: the IMU is a separate part
+// soldered in whatever orientation suited the board, and owes the display
+// nothing. Held upright this one reads ax = -0.88, which no reading of the
+// display rotation predicts.
 //
-// Working from a reference also kills the wrap: both angles come out of asin
-// about the reference, so level is 0 and nothing crosses a discontinuity until
-// you are past 90 degrees, which no pilot is.
-const LEVEL_DEFAULT = [-1, 0, 0];   // ax, ay, az when held level
-const SCREEN_RIGHT = [0, 1, 0];     // device +y, from the panel's 270 rotation
+// So nothing is assumed. The pilot demonstrates four extremes and each axis is
+// defined as whatever actually moved. Roll comes out positive banking right and
+// pitch positive nose up by construction, so there is no sign left to invert.
+const POSES = [
+  { key: 'level', say: 'Hold it <em>level</em>, as if flying straight' },
+  { key: 'left',  say: 'Now roll <em>full left</em>' },
+  { key: 'right', say: 'Now roll <em>full right</em>' },
+  { key: 'down',  say: 'Now <em>nose down</em>' },
+  { key: 'up',    say: 'Now <em>nose up</em>' },
+];
 
 const dot = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
 const scale = (a, k) => [a[0] * k, a[1] * k, a[2] * k];
 const sub = (a, b) => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
-const cross = (a, b) => [
-  a[1] * b[2] - a[2] * b[1],
-  a[2] * b[0] - a[0] * b[2],
-  a[0] * b[1] - a[1] * b[0],
-];
 function unit(a) {
   const length = Math.hypot(a[0], a[1], a[2]) || 1;
   return scale(a, 1 / length);
 }
 
-// Two axes across the screen, perpendicular to whichever way gravity pointed
-// when this pose was taken as level.
-function frameFrom(level) {
-  const up = unit(level);
-  const right = unit(sub(SCREEN_RIGHT, scale(up, dot(SCREEN_RIGHT, up))));
-  return { up, right, forward: cross(up, right) };
+// Taking each axis from the difference between its two extremes doubles the
+// signal and cancels whatever the level pose was not quite level about.
+function frameFrom(poses) {
+  const up = unit(poses.level);
+  const flatten = v => {
+    const flat = sub(v, scale(up, dot(v, up)));
+    return unit(flat);
+  };
+  const right = flatten(sub(poses.right, poses.left));
+  const pitched = flatten(sub(poses.up, poses.down));
+  // Keep pitch independent of roll even if the demonstrated poses were not
+  // perpendicular to each other, which by hand they never are.
+  const forward = unit(sub(pitched, scale(right, dot(pitched, right))));
+  return { up, right, forward };
 }
 
-const degrees = value => Math.asin(Math.max(-1, Math.min(1, value))) * 180 / Math.PI;
+const angle = value => Math.asin(Math.max(-1, Math.min(1, value))) * 180 / Math.PI;
 
 function attitude(sample, frame) {
   const gravity = unit([sample[2], sample[3], sample[4]]);
   return {
-    roll: degrees(dot(gravity, frame.right)),
-    pitch: degrees(dot(gravity, frame.forward)),
+    roll: angle(dot(gravity, frame.right)),
+    pitch: angle(dot(gravity, frame.forward)),
   };
 }
 
-// The link still arrives in bursts every 20-80 ms. Easing towards the newest
-// reading costs a few milliseconds and stops the needles twitching between them.
+// The link arrives in bursts every 20-80 ms; easing costs a few milliseconds
+// and stops the needles twitching between packets.
 const smooth = (previous, next) => previous + (next - previous) * 0.25;
 
 const cards = new Map();
@@ -99,19 +111,23 @@ function card(name) {
   const root = document.createElement('div');
   root.className = 'player';
   root.innerHTML = `
-    <div><span class="name"></span> <span class="meta"></span></div>
-    <div class="axis"><span>roll</span><div class="track"><div class="fill" data-roll></div></div><span class="value" data-roll-v>0°</span></div>
-    <div class="axis"><span>pitch</span><div class="track"><div class="fill" data-pitch></div></div><span class="value" data-pitch-v>0°</span></div>
+    <div class="name"></div>
+    <div class="meta"></div>
+    <div class="calibrate"><div class="step"></div></div>
+    <div class="axis"><span>roll</span><div class="track"><div class="fill" data-roll></div></div><span class="value" data-roll-v>0&deg;</span></div>
+    <div class="axis"><span>pitch</span><div class="track"><div class="fill" data-pitch></div></div><span class="value" data-pitch-v>0&deg;</span></div>
     <div class="triggers"><div class="trigger" data-left>BOOT</div><div class="trigger" data-right>PWR</div></div>
-    <button data-centre>Centre on this pose</button>
+    <button data-recalibrate>Start over</button>
     <button data-panel>Send a panel test</button>`;
   root.querySelector('.name').textContent = name;
   const list = document.getElementById('players');
-  list.querySelector('.empty')?.remove();
+  const empty = list.querySelector('.empty');
+  if (empty) empty.remove();
   list.append(root);
 
   const entry = {
-    root,
+    banner: root.querySelector('.calibrate'),
+    step: root.querySelector('.step'),
     meta: root.querySelector('.meta'),
     left: root.querySelector('[data-left]'),
     right: root.querySelector('[data-right]'),
@@ -120,14 +136,11 @@ function card(name) {
     rollValue: root.querySelector('[data-roll-v]'),
     pitchValue: root.querySelector('[data-pitch-v]'),
     index: cards.size,
-    frame: frameFrom(LEVEL_DEFAULT),
-    roll: 0,
-    pitch: 0,
-    last: null,
+    poses: {}, at: 0, frame: null, roll: 0, pitch: 0, recent: [],
   };
-  root.querySelector('[data-centre]').onclick = () => {
-    if (entry.last) entry.frame = frameFrom([entry.last[2], entry.last[3], entry.last[4]]);
-  };
+
+  entry.restart = () => { entry.poses = {}; entry.at = 0; entry.frame = null; };
+  root.querySelector('[data-recalibrate]').onclick = entry.restart;
   root.querySelector('[data-panel]').onclick = () => fetch('/', {
     method: 'POST',
     body: JSON.stringify({
@@ -141,8 +154,13 @@ function card(name) {
   return entry;
 }
 
-// A signed angle drawn from the centre, so level reads as nothing and a hard
-// bank reads as a wide bar on the side you are banking towards.
+// A pose is the middle of the last half second, so the thumb pressing the
+// button cannot tilt the answer it records.
+function median(samples, index) {
+  const values = samples.map(s => s[index]).sort((a, b) => a - b);
+  return values[Math.floor(values.length / 2)] || 0;
+}
+
 function setAxis(fill, value, degrees, limit = 90) {
   const clamped = Math.max(-limit, Math.min(limit, degrees));
   const half = Math.abs(clamped) / limit * 50;
@@ -151,34 +169,51 @@ function setAxis(fill, value, degrees, limit = 90) {
   value.textContent = Math.round(degrees) + '°';
 }
 
-new EventSource('/stream').onmessage = event => {
-  for (const player of JSON.parse(event.data).players) {
+new EventSource('/stream').onmessage = function (event) {
+  const payload = JSON.parse(event.data);
+  for (const player of payload.players) {
     const view = card(player.name);
-    const last = player.samples.at(-1);
-    if (!last) continue;
+    if (!player.samples.length) continue;
 
-    view.last = last;
+    view.recent.push(...player.samples);
+    if (view.recent.length > 50) view.recent = view.recent.slice(-50);
+    const last = player.samples[player.samples.length - 1];
 
-    // Centring belongs on the thing in your hands. Both triggers at once is a
-    // gesture no weapon uses, and it fires on the edge so holding them does not
-    // re-level continuously while you fly.
-    const bothHeld = last[8] === 1 && last[9] === 1;
-    if (bothHeld && !view.bothHeld) view.frame = frameFrom([last[2], last[3], last[4]]);
+    const boot = last[8] === 1, pwr = last[9] === 1;
+    const bothHeld = boot && pwr;
+
+    if (bothHeld && !view.bothHeld) {
+      view.restart();
+    } else if (boot && !view.boot && view.at < POSES.length) {
+      view.poses[POSES[view.at].key] =
+        [median(view.recent, 2), median(view.recent, 3), median(view.recent, 4)];
+      view.at += 1;
+      if (view.at === POSES.length) view.frame = frameFrom(view.poses);
+    }
+    view.boot = boot;
     view.bothHeld = bothHeld;
 
-    const { roll, pitch } = attitude(last, view.frame);
-    view.roll = smooth(view.roll, roll);
-    view.pitch = smooth(view.pitch, pitch);
+    if (view.frame) {
+      view.banner.className = 'calibrate done';
+      view.step.textContent = 'Calibrated. Both triggers together to start over.';
+      const measured = attitude(last, view.frame);
+      view.roll = smooth(view.roll, measured.roll);
+      view.pitch = smooth(view.pitch, measured.pitch);
+    } else {
+      view.banner.className = 'calibrate';
+      view.step.innerHTML =
+        'Step ' + (view.at + 1) + ' of ' + POSES.length + ': ' +
+        POSES[view.at].say + ', then press BOOT';
+    }
+
     setAxis(view.rollFill, view.rollValue, view.roll);
     setAxis(view.pitchFill, view.pitchValue, view.pitch);
 
-    view.left.classList.toggle('on', last[8] === 1);
-    view.right.classList.toggle('on', last[9] === 1);
-    // Raw axes stay on screen: if the frame above is wrong, the numbers say so
-    // immediately instead of after another round of guessing.
+    view.left.classList.toggle('on', boot);
+    view.right.classList.toggle('on', pwr);
     view.meta.textContent =
-      `${player.header.rate_hz || '?'} Hz · ${player.dropped} dropped · ` +
-      `ax ${last[2]} ay ${last[3]} az ${last[4]}`;
+      (player.header.rate_hz || '?') + ' Hz · ' + player.dropped + ' dropped · ' +
+      'ax ' + last[2] + ' ay ' + last[3] + ' az ' + last[4];
   }
 };
 </script>
