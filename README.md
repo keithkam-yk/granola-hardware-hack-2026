@@ -43,6 +43,24 @@ The probe drives nothing, ever. It only configures inputs. A single unverified
 pin driven on the sibling board latched its panel into a striped mode that
 survived reflashes, which is a day nobody needs twice.
 
+### The stick, measured
+
+The axis frame is not derivable. The IMU is a separate part soldered in whatever
+orientation suited the board, and it owes the panel's rotation nothing. Worse,
+the frame depends on how the board is *held*, and this one is flown flat like a
+tray rather than upright like a yoke, so three careful derivations from the
+display rotation were all wrong about the pose before they were wrong about the
+axes.
+
+So the pilot demonstrates it: level, full left, full right, nose down, nose up,
+pressing BOOT at each. Every axis is defined as whatever moved between its two
+extremes, which makes roll positive banking right and pitch positive nose up by
+construction, leaving no sign to invert. The result lands in
+`host/calibration.json` and every view reads it, so it is measured once.
+
+Measured for this board and this grip, up is very nearly `-z`, roll runs along
+`+x` and pitch along `+y`.
+
 ## Split of responsibilities
 
 ```
