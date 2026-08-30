@@ -10,6 +10,7 @@ on a laptop or a TV box with nothing to install.
 """
 import argparse
 import json
+import re
 import queue
 import socket
 import sys
@@ -28,6 +29,10 @@ DISCOVERY_REPLY = "DOGFIGHT {port}"
 FLUSH_INTERVAL = 1 / 60          # one display frame's worth of samples per event
 SILENCE_TIMEOUT = 3              # seconds without a sample before a board is gone
 SAMPLE_COLUMNS = 10              # seq,t_us,ax,ay,az,gx,gy,gz,btn_l,btn_r
+
+# A view name may only ever be a plain word, so a request can never reach
+# outside the host directory.
+PAGE_NAME = re.compile(r"[a-z0-9-]{1,32}")
 
 
 class Hub:
@@ -258,7 +263,16 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path.startswith("/stream"):
             return self.serve_stream()
-        body = (HERE / "game.html").read_bytes()
+
+        # "/" is the link check; "/2d" serves proto-2d.html and so on, so a view
+        # is reachable the moment its file exists without touching this file.
+        name = self.path.strip("/").split("?")[0]
+        page = HERE / "game.html" if not name else HERE / f"proto-{name}.html"
+        if not name or not PAGE_NAME.fullmatch(name) or not page.is_file():
+            if name:
+                return self.send_error(404, f"no view called {name}")
+
+        body = page.read_bytes()
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
