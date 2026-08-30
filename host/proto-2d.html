@@ -1,0 +1,949 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Dogfight — Direction A (one screen, 2D)</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+  :root { color-scheme: dark; }
+  html, body { margin: 0; height: 100%; background: #05070a; overflow: hidden;
+               font: 13px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; color: #dfe7f2; }
+  #view { display: block; width: 100vw; height: 100vh; }
+  #help {
+    position: fixed; left: 16px; top: 16px; max-width: 380px; padding: 14px 16px;
+    background: rgba(6,10,16,.86); border: 1px solid #1d2836; border-radius: 8px;
+    backdrop-filter: blur(6px); pointer-events: none;
+  }
+  #help h1 { font-size: 13px; margin: 0 0 8px; letter-spacing: .12em; text-transform: uppercase; color: #7fd4ff; }
+  #help table { border-collapse: collapse; }
+  #help td { padding: 1px 10px 1px 0; vertical-align: top; }
+  #help td:first-child { color: #8ea3bb; white-space: nowrap; }
+  #help p { margin: 8px 0 0; color: #8ea3bb; }
+  kbd { background: #16202c; border: 1px solid #263243; border-radius: 3px; padding: 0 4px; }
+  #conn { position: fixed; right: 16px; top: 16px; padding: 6px 10px; border-radius: 6px;
+          background: rgba(6,10,16,.86); border: 1px solid #1d2836; color: #8ea3bb; }
+  #conn.live { color: #7dffb0; border-color: #1d4a33; }
+  #banner { position: fixed; inset: 0; display: none; place-items: center; pointer-events: none; }
+  #banner div { font-size: 34px; letter-spacing: .3em; text-transform: uppercase;
+                text-shadow: 0 0 30px rgba(0,0,0,.9); }
+</style>
+
+<canvas id="view"></canvas>
+<div id="conn">board: offline — keyboard harness</div>
+<div id="help">
+  <h1>Direction A — one screen, 2D</h1>
+  <table>
+    <tr><td><kbd>A</kbd>/<kbd>D</kbd></td><td>P1 bank (board: tilt left/right)</td></tr>
+    <tr><td><kbd>W</kbd>/<kbd>S</kbd></td><td>P1 throttle (board: tilt fore/aft)</td></tr>
+    <tr><td><kbd>F</kbd> / <kbd>G</kbd></td><td>P1 cannon / missile (board: BOOT / PWR)</td></tr>
+    <tr><td>arrows</td><td>P2 bank + throttle</td></tr>
+    <tr><td><kbd>,</kbd> / <kbd>.</kbd></td><td>P2 cannon / missile</td></tr>
+    <tr><td>drag mouse</td><td>fly P1 (x = bank, y = throttle), click = cannon</td></tr>
+    <tr><td><kbd>1</kbd> / <kbd>2</kbd></td><td>toggle bot for P1 / P2</td></tr>
+    <tr><td><kbd>Space</kbd> <kbd>R</kbd> <kbd>H</kbd></td><td>pause · restart · hide this</td></tr>
+  </table>
+  <p>Idle 6 s and both planes fly themselves (attract mode).</p>
+</div>
+<div id="banner"><div></div></div>
+
+<script>
+"use strict";
+
+/* ===========================================================================
+   PART 1 — CONTROLLER INPUT
+   Lifted from ../magic-wand/host/viewer.html: Madgwick IMU-only fusion plus the
+   continuous gyro-bias estimation that keeps a warm part from creeping. Both
+   prototypes carry their own copy on purpose: the brief asks for two files that
+   each stand alone with no fetches of any kind.
+   =========================================================================== */
+
+const qnorm = q => { const n = Math.hypot(q[0],q[1],q[2],q[3]) || 1; return [q[0]/n,q[1]/n,q[2]/n,q[3]/n]; };
+
+// The panel runs LV_DISPLAY_ROTATION_270 (firmware/main/hud.c), so the board is
+// held long-edge-horizontal and the frame the pilot sees is rotated 90 deg CCW
+// from the IMU's own axes: Xland = -Yimu, Yland = +Ximu, Zland = Zimu. Kept as a
+// table so it can be corrected against real hardware without touching the maths.
+const AXIS_REMAPS = {
+  "rot270 (hud.c default)": v => [-v[1],  v[0], v[2]],
+  "rot90":                  v => [ v[1], -v[0], v[2]],
+  "rot0":                   v => [ v[0],  v[1], v[2]],
+  "rot180":                 v => [-v[0], -v[1], v[2]],
+};
+let axisRemap = AXIS_REMAPS["rot270 (hud.c default)"];
+
+class Fusion {
+  constructor() {
+    this.q = [1,0,0,0];
+    this.beta = 0.08;
+    this.gravityEst = [0,0,1];       // measured gravity direction, sensor frame
+    this.bias = [0,0,0];             // gyro zero-rate offset, learned while still
+    this.biasAcc = [0,0,0]; this.biasN = 0; this.biasDone = false;
+    this.gravityMag = 0;
+    this.veryStillSince = performance.now();
+    this.scales = { acc: 8/32768, gyr: 2048/32768 };
+    this.lastT = null;
+    this.level = [1,0,0,0];          // "flat in the hand" offset, set by recentre
+  }
+
+  setHeader(h) {
+    if (!h) return;
+    if (h.acc_scale_g) this.scales.acc = +h.acc_scale_g;
+    if (h.gyr_scale_dps) this.scales.gyr = +h.gyr_scale_dps;
+  }
+
+  seedFromAccel(a) {
+    const n = Math.hypot(...a); if (n < 1e-6) return;
+    const [x,y,z] = [a[0]/n, a[1]/n, a[2]/n];
+    if (z >  0.999999) { this.q = [1,0,0,0]; return; }
+    if (z < -0.999999) { this.q = [0,1,0,0]; return; }   // 180 deg about X
+    const axis = [y,-x,0], an = Math.hypot(...axis);
+    const angle = Math.acos(Math.max(-1, Math.min(1, z))), sh = Math.sin(angle/2);
+    this.q = qnorm([Math.cos(angle/2), axis[0]/an*sh, axis[1]/an*sh, axis[2]/an*sh]);
+  }
+
+  madgwick(gx, gy, gz, ax, ay, az, dt) {
+    gx *= Math.PI/180; gy *= Math.PI/180; gz *= Math.PI/180;
+    let [qw,qx,qy,qz] = this.q;
+    let dw = 0.5*(-qx*gx - qy*gy - qz*gz);
+    let dx = 0.5*( qw*gx + qy*gz - qz*gy);
+    let dy = 0.5*( qw*gy - qx*gz + qz*gx);
+    let dz = 0.5*( qw*gz + qx*gy - qy*gx);
+    const an = Math.hypot(ax,ay,az);
+    if (an > 1e-6) {
+      ax/=an; ay/=an; az/=an;
+      this.gravityEst = [2*(qx*qz - qw*qy), 2*(qw*qx + qy*qz), 2*(0.5 - qx*qx - qy*qy)];
+      const f1 = this.gravityEst[0]-ax, f2 = this.gravityEst[1]-ay, f3 = this.gravityEst[2]-az;
+      let sw = -2*qy*f1 + 2*qx*f2;
+      let sx =  2*qz*f1 + 2*qw*f2 - 4*qx*f3;
+      let sy = -2*qw*f1 + 2*qz*f2 - 4*qy*f3;
+      let sz =  2*qx*f1 + 2*qy*f2;
+      const sn = Math.hypot(sw,sx,sy,sz);
+      if (sn > 1e-9) { const b = this.beta; dw -= b*sw/sn; dx -= b*sx/sn; dy -= b*sy/sn; dz -= b*sz/sn; }
+    }
+    this.q = qnorm([qw+dw*dt, qx+dx*dt, qy+dy*dt, qz+dz*dt]);
+  }
+
+  /** Feed one raw device sample. Returns nothing; read .tilt() for the stick. */
+  sample(s) {
+    const [, t_us, ax, ay, az, gx, gy, gz] = s;
+    let dt = 1/200;
+    if (this.lastT !== null) {
+      let d = (t_us - this.lastT) / 1e6;
+      if (d < 0) d += 2**32 / 1e6;              // firmware timestamp wraps at 32 bits
+      if (d > 0 && d < 0.2) dt = d;
+    }
+    this.lastT = t_us;
+
+    const acc = [ax*this.scales.acc, ay*this.scales.acc, az*this.scales.acc];
+    let g = [gx*this.scales.gyr, gy*this.scales.gyr, gz*this.scales.gyr];
+
+    if (!this.biasDone) {
+      for (let i=0;i<3;i++) this.biasAcc[i] += g[i];
+      if (++this.biasN >= 200) {                 // ~1 s at 200 Hz
+        this.bias = this.biasAcc.map(v => v/this.biasN);
+        this.seedFromAccel(acc);
+        this.biasDone = true;
+      }
+    }
+    const gyro = [g[0]-this.bias[0], g[1]-this.bias[1], g[2]-this.bias[2]];
+    this.madgwick(gyro[0],gyro[1],gyro[2], acc[0],acc[1],acc[2], dt);
+
+    // Gyro bias walks as the part warms, so keep folding in whatever rate is
+    // reported while the board is genuinely motionless. Without this the stick
+    // develops a slow steady lean over a few minutes of play.
+    const accMag = Math.hypot(...acc);
+    if (this.gravityMag === 0) this.gravityMag = accMag;
+    if (Math.abs(accMag - this.gravityMag) < 0.15)
+      this.gravityMag += (accMag - this.gravityMag) * (1 - Math.exp(-dt/0.4));
+    const spin = Math.hypot(...gyro);
+    if (!(Math.abs(accMag - this.gravityMag) < 0.03 && spin < 2.5)) this.veryStillSince = performance.now();
+    if (performance.now() - this.veryStillSince > 400 && this.biasDone) {
+      const k = 1 - Math.exp(-dt/1.5);
+      for (let i=0;i<3;i++) this.bias[i] += gyro[i]*k;
+    }
+  }
+
+  /** Recentre: whatever the board is doing right now becomes neutral stick. */
+  recentre() { this.level = this.gravityEst.slice(); }
+
+  /**
+   * Stick position in the pilot's landscape frame, both in [-1,1].
+   * bank  > 0 : right wing down.  climb > 0 : near edge pulled down.
+   */
+  tilt() {
+    const u = axisRemap(this.gravityEst);
+    const l = axisRemap(this.level ? this.level : [0,0,1]);
+    // Neutral is wherever recentre was pressed, so the pilot can hold the board
+    // at whatever angle is comfortable rather than dead flat.
+    const bank  = Math.atan2(u[0], Math.max(0.15, u[2])) - Math.atan2(l[0], Math.max(0.15, l[2]));
+    const climb = Math.atan2(u[1], Math.max(0.15, u[2])) - Math.atan2(l[1], Math.max(0.15, l[2]));
+    const span = Math.PI/4;                      // 45 deg of tilt = full deflection
+    const clamp = v => Math.max(-1, Math.min(1, v/span));
+    return { bank: clamp(bank), climb: clamp(climb) };
+  }
+}
+
+/**
+ * One player's stick + triggers, whatever the source. Buttons arrive as levels;
+ * the rising edge is derived here so a held button can never repeat-fire — the
+ * hardware brief is explicit that both weapons are one shot per press.
+ */
+class Stick {
+  constructor() {
+    this.bank = 0; this.climb = 0;
+    this.fusion = new Fusion();
+    this.level = [0,0];             // last raw button levels
+    this.edge  = [false,false];     // consumed by the sim each frame
+    this.live = false;              // true once real samples have arrived
+  }
+  feed(header, samples) {
+    this.fusion.setHeader(header);
+    for (const s of samples) {
+      this.fusion.sample(s);
+      const bl = s[8]|0, br = s[9]|0;
+      if (bl && !this.level[0]) this.edge[0] = true;
+      if (br && !this.level[1]) this.edge[1] = true;
+      this.level = [bl, br];
+    }
+    const t = this.fusion.tilt();
+    this.bank = t.bank; this.climb = t.climb;
+    this.live = true;
+  }
+  press(i) { this.edge[i] = true; }
+  takeEdge(i) { const e = this.edge[i]; this.edge[i] = false; return e; }
+}
+
+const sticks = [new Stick(), new Stick()];
+
+/* ---- the real stream, when a board is plugged in --------------------------- */
+const connEl = document.getElementById("conn");
+function openStream() {
+  let es;
+  try { es = new EventSource("/stream"); } catch { return; }
+  es.onmessage = ev => {
+    let obj; try { obj = JSON.parse(ev.data); } catch { return; }
+    // Two shapes are accepted: the two-player {players:[...]} envelope the game
+    // host emits, and the single-player {h,dropped,s} envelope inherited from
+    // magic-wand, which is what host/dogfight.py still sends today.
+    if (Array.isArray(obj.players)) {
+      obj.players.forEach((p, i) => { if (sticks[i]) sticks[i].feed(p.header, p.samples || []); });
+    } else if (Array.isArray(obj.s)) {
+      sticks[0].feed(obj.h, obj.s);
+    }
+    connEl.textContent = "board: live";
+    connEl.className = "live";
+    bots[0] = false;
+    if (sticks[1].live) bots[1] = false;
+  };
+  es.onerror = () => {
+      connEl.textContent = "board: offline — keyboard harness"; connEl.className = "";
+      // Without this the browser reconnects a few times a second forever and the
+      // console fills with 404s on any host that is not serving the game.
+      es.close();
+      setTimeout(openStream, 5000);
+    };
+}
+openStream();
+
+/* ===========================================================================
+   PART 2 — KEYBOARD / MOUSE HARNESS
+   =========================================================================== */
+
+const keys = new Set();
+let lastHumanInput = 0;
+const bots = [true, true];
+let paused = false;
+
+addEventListener("keydown", e => {
+  if (e.repeat) { e.preventDefault(); return; }
+  const k = e.key.toLowerCase();
+  keys.add(k);
+  lastHumanInput = performance.now();
+  if (k === "f") { sticks[0].press(0); bots[0] = false; }
+  if (k === "g") { sticks[0].press(1); bots[0] = false; }
+  if (k === ",") { sticks[1].press(0); bots[1] = false; }
+  if (k === ".") { sticks[1].press(1); bots[1] = false; }
+  if ("adws".includes(k)) bots[0] = false;
+  if (k.startsWith("arrow")) bots[1] = false;
+  if (k === "1") bots[0] = !bots[0];
+  if (k === "2") bots[1] = !bots[1];
+  if (k === " ") paused = !paused;
+  if (k === "r") reset();
+  if (k === "c") sticks.forEach(s => s.fusion.recentre());
+  if (k === "h") { const h = document.getElementById("help"); h.style.display = h.style.display === "none" ? "" : "none"; }
+  if ([" ","arrowup","arrowdown","arrowleft","arrowright"].includes(k)) e.preventDefault();
+});
+addEventListener("keyup", e => keys.delete(e.key.toLowerCase()));
+
+let mouse = null;
+addEventListener("mousedown", e => { mouse = [e.clientX, e.clientY]; bots[0] = false; sticks[0].press(0); lastHumanInput = performance.now(); });
+addEventListener("mousemove", e => { if (mouse) { mouse = [e.clientX, e.clientY]; lastHumanInput = performance.now(); } });
+addEventListener("mouseup", () => mouse = null);
+
+/** Fold keyboard/mouse into the same stick the board would drive. */
+function harness() {
+  const s0 = sticks[0];
+  if (!s0.live) {
+    let b = (keys.has("d") ? 1 : 0) - (keys.has("a") ? 1 : 0);
+    let c = (keys.has("w") ? 1 : 0) - (keys.has("s") ? 1 : 0);
+    if (mouse) { b = Math.max(-1, Math.min(1, (mouse[0]/innerWidth - .5) * 2.4));
+                 c = Math.max(-1, Math.min(1, (.5 - mouse[1]/innerHeight) * 2.4)); }
+    s0.bank = b; s0.climb = c;
+  }
+  const s1 = sticks[1];
+  if (!s1.live) {
+    s1.bank  = (keys.has("arrowright") ? 1 : 0) - (keys.has("arrowleft") ? 1 : 0);
+    s1.climb = (keys.has("arrowup") ? 1 : 0) - (keys.has("arrowdown") ? 1 : 0);
+  }
+  // Attract mode: nobody has touched anything for six seconds, so let them fly.
+  if (performance.now() - lastHumanInput > 6000 && !sticks[0].live && !sticks[1].live) {
+    bots[0] = true; bots[1] = true;
+  }
+}
+
+/* ===========================================================================
+   PART 3 — THE SIM
+   Flat arena, seen from above. Bank turns, throttle sets speed, and altitude is
+   a slow consequence of the energy trade — which is what stops the whole thing
+   collapsing into a 2D chase: guns only bite when the two planes are on the same
+   level, so climbing is a real way to break a lock.
+   =========================================================================== */
+
+const W = 4600, H = 3400;                 // arena, world units
+const ARENA = { x0: -W/2, y0: -H/2, x1: W/2, y1: H/2 };
+
+const TUNE = {
+  speedMin: 190, speedMax: 430,
+  accel: 210,                             // world units / s^2 toward target speed
+  turnBase: 2.5,                          // rad/s at full bank, undamaged
+  turnSlowFactor: 1.35,                   // slower planes turn tighter
+  altRate: 0.55,                          // altitude band / s at full climb
+  cannonSpeed: 2100, cannonLife: 0.85, cannonDamage: 4.2, cannonAmmo: 120, cannonSpread: 0.026,
+  cannonCooldown: 0.085,
+  missileSpeed: 620, missileAccel: 320, missileTurn: 2.2, missileLife: 6.5,
+  missileDamage: 26, missileAmmo: 4, missileCooldown: 0.6,
+  lockCone: Math.cos(0.70), lockRange: 1900, lockTime: 1.0,
+  altTolerance: 0.30,                     // gun hits need the planes on a level
+};
+
+const PALETTE = [
+  { key: "#ffb347", trail: "rgba(255,179,71,.55)", name: "AMBER" },
+  { key: "#5ad1ff", trail: "rgba(90,209,255,.55)", name: "AZURE" },
+];
+
+let planes = [], bullets = [], missiles = [], puffs = [], scores = [0,0];
+let over = null, overAt = 0;
+
+function makePlane(i) {
+  return {
+    i, x: i === 0 ? -1250 : 1250, y: i === 0 ? 700 : -700,
+    heading: i === 0 ? -0.5 : Math.PI - 0.5,
+    speed: 300, alt: i === 0 ? 0.35 : 0.65,
+    bank: 0, hull: 100, wingL: 100, wingR: 100,
+    cannonAmmo: TUNE.cannonAmmo, missileAmmo: TUNE.missileAmmo,
+    cannonCd: 0, missileCd: 0,
+    lock: 0, locked: false,
+    trailL: [], trailR: [],
+    hitFlash: 0, dead: false, respawn: 0,
+    botFireCd: 0, frustration: 0,
+  };
+}
+function reset() {
+  planes = [makePlane(0), makePlane(1)];
+  bullets = []; missiles = []; puffs = []; over = null;
+}
+reset();
+
+const wrapAngle = a => Math.atan2(Math.sin(a), Math.cos(a));
+const lerp = (a,b,t) => a + (b-a)*t;
+
+function turnRate(p, dir) {
+  // Damage is per side, so the wing you are loading is the one that matters:
+  // shoot someone's left wing off and they can still break right at full rate.
+  const wing = dir < 0 ? p.wingL : p.wingR;
+  const health = 0.30 + 0.70 * (wing/100);
+  const speedTerm = lerp(TUNE.turnSlowFactor, 0.78, (p.speed - TUNE.speedMin)/(TUNE.speedMax - TUNE.speedMin));
+  return TUNE.turnBase * health * speedTerm;
+}
+
+function damage(p, amount, fromX, fromY) {
+  if (p.dead) return;
+  p.hull = Math.max(0, p.hull - amount);
+  // Which side took it: project the impact into the target's own frame.
+  const dx = fromX - p.x, dy = fromY - p.y;
+  const side = -Math.sin(p.heading)*dx*0 + (Math.cos(p.heading)*dy - Math.sin(p.heading)*dx);
+  if (side < 0) p.wingL = Math.max(0, p.wingL - amount*0.8);
+  else          p.wingR = Math.max(0, p.wingR - amount*0.8);
+  p.hitFlash = 1;
+  for (let k=0;k<4;k++) puffs.push({ x: p.x, y: p.y, alt: p.alt, r: 3+Math.random()*6, life: .5,
+                                     vx: (Math.random()-.5)*90, vy: (Math.random()-.5)*90, c: "255,220,150" });
+  if (p.hull <= 0) {
+    p.dead = true; p.respawn = 2.6;
+    scores[1-p.i]++;
+    for (let k=0;k<40;k++) puffs.push({ x: p.x, y: p.y, alt: p.alt, r: 4+Math.random()*16, life: 1.4,
+                                        vx: (Math.random()-.5)*420, vy: (Math.random()-.5)*420, c: "255,140,60" });
+    if (scores[1-p.i] >= 5) { over = `${PALETTE[1-p.i].name} WINS`; overAt = performance.now(); }
+  }
+}
+
+function fireCannon(p) {
+  if (p.dead || p.cannonAmmo <= 0 || p.cannonCd > 0) return;
+  p.cannonAmmo--; p.cannonCd = TUNE.cannonCooldown;
+  const a = p.heading + (Math.random()-.5)*TUNE.cannonSpread;
+  const nose = 26;
+  bullets.push({
+    owner: p.i, x: p.x + Math.cos(a)*nose, y: p.y + Math.sin(a)*nose, alt: p.alt,
+    vx: Math.cos(a)*TUNE.cannonSpeed + Math.cos(p.heading)*p.speed,
+    vy: Math.sin(a)*TUNE.cannonSpeed + Math.sin(p.heading)*p.speed,
+    life: TUNE.cannonLife,
+  });
+}
+
+function fireMissile(p, target) {
+  if (p.dead || p.missileAmmo <= 0 || p.missileCd > 0 || !p.locked) return;
+  p.missileAmmo--; p.missileCd = TUNE.missileCooldown; p.lock = 0; p.locked = false;
+  missiles.push({
+    owner: p.i, x: p.x, y: p.y, alt: p.alt, heading: p.heading,
+    speed: p.speed + 60, life: TUNE.missileLife, target, smoke: [],
+  });
+}
+
+function updateLock(p, other, dt) {
+  if (p.dead || other.dead) { p.lock = 0; p.locked = false; return; }
+  const dx = other.x - p.x, dy = other.y - p.y;
+  const dist = Math.hypot(dx, dy);
+  const aim = Math.cos(wrapAngle(Math.atan2(dy,dx) - p.heading));
+  const good = dist < TUNE.lockRange && aim > TUNE.lockCone;
+  p.lock = Math.max(0, Math.min(1, p.lock + (good ? dt/TUNE.lockTime : -dt/0.5)));
+  p.locked = p.lock >= 1;
+}
+
+/**
+ * A serviceable pursuit bot: lead the target, roll into the turn, shoot when
+ * lined up -- and, crucially, know when to give up and come back around.
+ */
+function botStick(p, other, dt) {
+  if (p.dead || other.dead) return { bank: 0.2, climb: 0 };
+  const dx = other.x - p.x, dy = other.y - p.y;
+  const dist = Math.hypot(dx, dy);
+  const aim = Math.cos(wrapAngle(Math.atan2(dy,dx) - p.heading));
+
+  // Steer back inside the arena before anything else; a bot that flies into the
+  // wall reads as broken even though it is only single-minded.
+  const margin = 500;
+  const outside = p.x < ARENA.x0+margin || p.x > ARENA.x1-margin ||
+                  p.y < ARENA.y0+margin || p.y > ARENA.y1-margin;
+  if (outside) {
+    p.frustration = 0;
+    return { bank: Math.max(-1, Math.min(1, wrapAngle(Math.atan2(-p.y,-p.x) - p.heading)*2.2)), climb: 0.2 };
+  }
+
+  // Two planes with the same turn rate, separated by less than their turn
+  // radius, circle each other forever and neither can ever point. That flat
+  // co-orbit is the natural attractor of a 2D dogfight, and it is dead boring.
+  // Track how long this bot has failed to get a shot, and when it has been too
+  // long, do what a pilot does: extend, take the separation and the height, and
+  // come back around.
+  if (aim > 0.90 && dist < 900) p.frustration = 0;
+  else p.frustration = (p.frustration || 0) + dt;
+  if (p.frustration > 3.5) {
+    // Bound the extend. One shared camera has to hold both planes, so a bot that
+    // runs to the far wall shrinks the whole fight to two specks.
+    if (p.frustration > 6.5 || dist > 1500) p.frustration = 0;
+    const away = Math.atan2(p.y - other.y, p.x - other.x);
+    return { bank: Math.max(-1, Math.min(1, wrapAngle(away - p.heading)*2.0)), climb: 1 };
+  }
+
+  const lead = Math.min(1.1, dist / TUNE.cannonSpeed);
+  const tx = other.x + Math.cos(other.heading)*other.speed*lead;
+  const ty = other.y + Math.sin(other.heading)*other.speed*lead;
+  const err = wrapAngle(Math.atan2(ty - p.y, tx - p.x) - p.heading);
+  const bank = Math.max(-1, Math.min(1, err*2.2));
+  // Match the target's level to bring the guns to bear; climb away when hurt,
+  // because above the tolerance band the cannon simply cannot reach.
+  const altWant = p.hull < 35 ? Math.min(1, other.alt + 0.5) : other.alt;
+  const climb = Math.max(-1, Math.min(1, (altWant - p.alt)*4 + (dist > 1600 ? 0.35 : -0.1)));
+  return { bank, climb };
+}
+
+function simulate(dt) {
+  harness();
+  const [a, b] = planes;
+
+  for (const p of planes) {
+    const other = planes[1-p.i];
+    let s = sticks[p.i];
+    let cmd = bots[p.i] ? botStick(p, other, dt) : { bank: s.bank, climb: s.climb };
+
+    if (p.dead) {
+      p.respawn -= dt;
+      if (p.respawn <= 0) Object.assign(p, makePlane(p.i), { });
+      continue;
+    }
+
+    // Bank follows the stick with a little roll inertia so the silhouette reads
+    // as a plane rolling rather than a cursor snapping.
+    p.bank += (cmd.bank - p.bank) * (1 - Math.exp(-dt/0.12));
+    const dir = p.bank < 0 ? -1 : 1;
+    p.heading = wrapAngle(p.heading + p.bank * turnRate(p, dir) * dt);
+
+    // Throttle. Turning hard bleeds speed, which is where the fight lives.
+    const target = lerp(TUNE.speedMin, TUNE.speedMax, (cmd.climb*0.5 + 0.5));
+    const bleed = Math.abs(p.bank) * 70;
+    p.speed += ((target - bleed) - p.speed) * (1 - Math.exp(-dt/ (TUNE.accel/220)));
+    p.speed = Math.max(TUNE.speedMin*0.75, Math.min(TUNE.speedMax, p.speed));
+
+    // Altitude is the energy account: throttle up and you climb, and the slow
+    // flat part of the band is where guns can reach you.
+    const climbWant = (p.speed - (TUNE.speedMin+TUNE.speedMax)/2) / ((TUNE.speedMax-TUNE.speedMin)/2);
+    p.alt = Math.max(0, Math.min(1, p.alt + climbWant * TUNE.altRate * dt * 0.55 + (bots[p.i] ? cmd.climb*TUNE.altRate*dt*0.5 : cmd.climb*TUNE.altRate*dt*0.5)));
+
+    p.x += Math.cos(p.heading) * p.speed * dt;
+    p.y += Math.sin(p.heading) * p.speed * dt;
+
+    // Soft arena: nose gets pushed back rather than a hard wall, so the fight
+    // stays in frame without ever taking the stick away outright.
+    const push = 320;
+    if (p.x < ARENA.x0+push) p.heading = wrapAngle(p.heading + wrapAngle(0 - p.heading)*dt*2.2);
+    if (p.x > ARENA.x1-push) p.heading = wrapAngle(p.heading + wrapAngle(Math.PI - p.heading)*dt*2.2);
+    if (p.y < ARENA.y0+push) p.heading = wrapAngle(p.heading + wrapAngle(Math.PI/2 - p.heading)*dt*2.2);
+    if (p.y > ARENA.y1-push) p.heading = wrapAngle(p.heading + wrapAngle(-Math.PI/2 - p.heading)*dt*2.2);
+
+    p.cannonCd = Math.max(0, p.cannonCd - dt);
+    p.missileCd = Math.max(0, p.missileCd - dt);
+    p.hitFlash = Math.max(0, p.hitFlash - dt*3);
+    updateLock(p, other, dt);
+
+    // Wingtip contrails. Bank squashes the span, so the two ribbons pinch
+    // together through a hard turn, which is most of the sense of roll.
+    const span = 20 * Math.cos(p.bank * 1.1);
+    const nx = -Math.sin(p.heading), ny = Math.cos(p.heading);
+    p.trailL.push([p.x + nx*span, p.y + ny*span, p.alt]);
+    p.trailR.push([p.x - nx*span, p.y - ny*span, p.alt]);
+    const cap = 90;
+    if (p.trailL.length > cap) p.trailL.shift();
+    if (p.trailR.length > cap) p.trailR.shift();
+
+    // Triggers. Both weapons are strictly one shot per rising edge.
+    let fireC, fireM;
+    if (bots[p.i]) {
+      p.botFireCd -= dt;
+      const dx = other.x-p.x, dy = other.y-p.y, dist = Math.hypot(dx,dy);
+      const aim = Math.cos(wrapAngle(Math.atan2(dy,dx) - p.heading));
+      // Deliberately imperfect: a bot that never misses turns every merge into
+      // a mutual kill and there is no fight left to look at.
+      fireC = !other.dead && dist < 950 && aim > 0.992 && Math.abs(p.alt-other.alt) < TUNE.altTolerance && p.botFireCd <= 0;
+      if (fireC) { p.botFireCd = 0.16 + Math.random()*0.12; if (Math.random() < 0.25) fireC = false; }
+      fireM = p.locked && dist > 650 && Math.random() < dt*0.7;
+    } else {
+      fireC = s.takeEdge(0);
+      fireM = s.takeEdge(1);
+    }
+    if (fireC) fireCannon(p);
+    if (fireM) fireMissile(p, other.i);
+  }
+
+  // -- bullets ---------------------------------------------------------------
+  for (const bl of bullets) {
+    const px = bl.x, py = bl.y;
+    bl.x += bl.vx*dt; bl.y += bl.vy*dt; bl.life -= dt;
+    const t = planes[1-bl.owner];
+    if (t.dead) continue;
+    // Segment-to-point: at 2100 u/s a frame step can skip clean through a plane.
+    const sx = bl.x-px, sy = bl.y-py;
+    const len2 = sx*sx+sy*sy || 1;
+    let u = ((t.x-px)*sx + (t.y-py)*sy) / len2;
+    u = Math.max(0, Math.min(1, u));
+    const cx = px + sx*u, cy = py + sy*u;
+    if (Math.hypot(t.x-cx, t.y-cy) < 30 && Math.abs(t.alt - bl.alt) < TUNE.altTolerance) {
+      damage(t, TUNE.cannonDamage, bl.x, bl.y);
+      bl.life = 0;
+    }
+  }
+  bullets = bullets.filter(b => b.life > 0);
+
+  // -- missiles --------------------------------------------------------------
+  for (const m of missiles) {
+    const t = planes[m.target];
+    m.life -= dt;
+    if (!t.dead) {
+      const want = Math.atan2(t.y-m.y, t.x-m.x);
+      const err = wrapAngle(want - m.heading);
+      m.heading = wrapAngle(m.heading + Math.max(-TUNE.missileTurn*dt, Math.min(TUNE.missileTurn*dt, err)));
+      m.alt += Math.max(-dt*0.6, Math.min(dt*0.6, t.alt - m.alt));
+    }
+    m.speed = Math.min(1200, m.speed + TUNE.missileAccel*dt);
+    m.x += Math.cos(m.heading)*m.speed*dt;
+    m.y += Math.sin(m.heading)*m.speed*dt;
+    m.smoke.push([m.x, m.y]);
+    if (m.smoke.length > 55) m.smoke.shift();
+    if (!t.dead && Math.hypot(t.x-m.x, t.y-m.y) < 46 && Math.abs(t.alt-m.alt) < 0.5) {
+      damage(t, TUNE.missileDamage, m.x, m.y);
+      for (let k=0;k<18;k++) puffs.push({ x: m.x, y: m.y, alt: m.alt, r: 4+Math.random()*12, life: .9,
+                                          vx:(Math.random()-.5)*300, vy:(Math.random()-.5)*300, c:"255,190,90" });
+      m.life = 0;
+    }
+  }
+  missiles = missiles.filter(m => m.life > 0);
+
+  for (const f of puffs) { f.x += f.vx*dt; f.y += f.vy*dt; f.vx *= 0.94; f.vy *= 0.94; f.life -= dt; }
+  puffs = puffs.filter(f => f.life > 0);
+
+  if (over && performance.now() - overAt > 3500) { scores = [0,0]; reset(); }
+}
+
+/* ===========================================================================
+   PART 4 — RENDER
+   Silhouettes against sky. Everything readable is either shape or colour, never
+   fine detail, because this is meant to be legible from a sofa.
+   =========================================================================== */
+
+const cv = document.getElementById("view");
+const ctx = cv.getContext("2d");
+let DPR = 1;
+function resize() {
+  DPR = Math.min(2, devicePixelRatio || 1);
+  cv.width = Math.floor(innerWidth*DPR); cv.height = Math.floor(innerHeight*DPR);
+}
+addEventListener("resize", resize); resize();
+
+// Cloud field. Fixed seed so the sky is the same picture every run and the
+// parallax reads as motion rather than noise.
+let seed = 20260830;
+const rnd = () => (seed = (seed*1664525 + 1013904223) >>> 0) / 4294967296;
+const clouds = Array.from({length: 90}, () => ({
+  x: ARENA.x0 + rnd()*W*1.4 - W*0.2,
+  y: ARENA.y0 + rnd()*H*1.4 - H*0.2,
+  r: 90 + rnd()*280,
+  layer: rnd() < 0.45 ? 0 : 1,
+  a: 0.05 + rnd()*0.12,
+}));
+
+const cam = { x: 0, y: 0, z: 0.7 };
+
+function camUpdate(dt) {
+  const [a,b] = planes;
+  const mx = (a.x+b.x)/2, my = (a.y+b.y)/2;
+  const spread = Math.max(Math.abs(a.x-b.x)/ (cv.width/DPR), Math.abs(a.y-b.y)/ (cv.height/DPR));
+  const want = Math.max(0.30, Math.min(1.25, 0.95 / Math.max(0.55, spread*1.5)));
+  const k = 1 - Math.exp(-dt/0.35);
+  cam.x = lerp(cam.x, mx, k); cam.y = lerp(cam.y, my, k); cam.z = lerp(cam.z, want, k);
+}
+
+function toScreen(x, y, alt) {
+  // Altitude buys a touch of parallax so a plane above you drifts differently
+  // from one below. Subtle on purpose: this is not a perspective view.
+  const p = 1 + (alt - 0.5) * 0.10;
+  return [ (x - cam.x) * cam.z * p + cv.width/(2*DPR),
+           (y - cam.y) * cam.z * p + cv.height/(2*DPR) ];
+}
+
+function drawSky() {
+  const w = cv.width/DPR, h = cv.height/DPR;
+  const g = ctx.createLinearGradient(0, 0, 0, h);
+  g.addColorStop(0, "#0d2a52"); g.addColorStop(0.55, "#2a6ba8"); g.addColorStop(1, "#8fc4e0");
+  ctx.fillStyle = g; ctx.fillRect(0,0,w,h);
+
+  // Sun glow, fixed to the world so the camera slides across it.
+  const [sx, sy] = toScreen(-1400, -1200, 0.5);
+  const sun = ctx.createRadialGradient(sx, sy, 0, sx, sy, 520);
+  sun.addColorStop(0, "rgba(255,245,215,.55)"); sun.addColorStop(1, "rgba(255,245,215,0)");
+  ctx.fillStyle = sun; ctx.fillRect(0,0,w,h);
+
+  for (const c of clouds) {
+    const par = c.layer === 0 ? 0.55 : 0.85;
+    const x = (c.x - cam.x)*cam.z*par + w/2, y = (c.y - cam.y)*cam.z*par + h/2;
+    const r = c.r*cam.z*par;
+    if (x < -r || y < -r || x > w+r || y > h+r) continue;
+    const cg = ctx.createRadialGradient(x, y, r*0.15, x, y, r);
+    cg.addColorStop(0, `rgba(255,255,255,${c.a*(c.layer?1:0.7)})`);
+    cg.addColorStop(1, "rgba(255,255,255,0)");
+    ctx.fillStyle = cg; ctx.beginPath(); ctx.arc(x,y,r,0,7); ctx.fill();
+  }
+
+  // Arena edge: a haze wall, not a fence.
+  const [ex0, ey0] = toScreen(ARENA.x0, ARENA.y0, 0.5);
+  const [ex1, ey1] = toScreen(ARENA.x1, ARENA.y1, 0.5);
+  ctx.save();
+  ctx.strokeStyle = "rgba(255,255,255,.10)"; ctx.lineWidth = 60*cam.z;
+  ctx.strokeRect(ex0, ey0, ex1-ex0, ey1-ey0);
+  ctx.restore();
+}
+
+function drawTrail(pts, colour, alt) {
+  if (pts.length < 2) return;
+  ctx.lineCap = "round";
+  for (let i = 1; i < pts.length; i++) {
+    const t = i / pts.length;
+    const [x0,y0] = toScreen(pts[i-1][0], pts[i-1][1], pts[i-1][2]);
+    const [x1,y1] = toScreen(pts[i][0], pts[i][1], pts[i][2]);
+    ctx.strokeStyle = colour.replace(/[\d.]+\)$/, (0.5*t*t).toFixed(3) + ")");
+    ctx.lineWidth = Math.max(0.6, (1 + 3.4*t) * cam.z * 1.6);
+    ctx.beginPath(); ctx.moveTo(x0,y0); ctx.lineTo(x1,y1); ctx.stroke();
+  }
+}
+
+/** Top-down fighter silhouette, one unit = one world unit at cam.z === 1. */
+function planePath(bank, wingL, wingR) {
+  // A hard bank hides the span, but never all of it: below about a third
+  // the shape stops reading as an aircraft from across the room.
+  const squash = Math.max(0.34, Math.cos(bank * 1.15));
+  const L = 26 * (0.45 + 0.55*wingL/100);
+  const R = 26 * (0.45 + 0.55*wingR/100);
+  const p = new Path2D();
+  p.moveTo( 30, 0);                       // nose
+  p.lineTo(  6, -3.2);
+  p.lineTo(  2, -L*squash);               // left wing (screen up = -y)
+  p.lineTo( -6, -L*squash*0.92);
+  p.lineTo( -4, -4);
+  p.lineTo(-18, -13*squash);              // tailplane
+  p.lineTo(-24, -12*squash);
+  p.lineTo(-22, 0);
+  p.lineTo(-24,  12*squash);
+  p.lineTo(-18,  13*squash);
+  p.lineTo( -4,  4);
+  p.lineTo( -6,  R*squash*0.92);
+  p.lineTo(  2,  R*squash);               // right wing
+  p.lineTo(  6,  3.2);
+  p.closePath();
+  return p;
+}
+
+function drawPlane(p) {
+  if (p.dead) return;
+  const [x,y] = toScreen(p.x, p.y, p.alt);
+  const scale = cam.z * lerp(0.90, 1.30, p.alt);
+  ctx.save();
+  ctx.translate(x,y); ctx.rotate(p.heading); ctx.scale(scale, scale);
+
+  const path = planePath(p.bank, p.wingL, p.wingR);
+
+  // Shadow-on-the-haze underneath sells altitude without a third dimension.
+  ctx.save();
+  ctx.translate(10 + p.alt*26, 14 + p.alt*30);
+  ctx.fillStyle = `rgba(10,25,45,${0.22 * (1-p.alt*0.5)})`;
+  ctx.fill(path);
+  ctx.restore();
+
+  ctx.fillStyle = p.hitFlash > 0 ? "#ffd9a0" : "#101820";
+  ctx.fill(path);
+  ctx.lineWidth = 1.6; ctx.strokeStyle = "rgba(230,245,255,.75)"; ctx.stroke(path);
+
+  // Player key: a coloured tail flash and canopy, the only saturated thing on
+  // the airframe so telling them apart survives being across the room.
+  ctx.fillStyle = PALETTE[p.i].key;
+  ctx.beginPath(); ctx.moveTo(-24,0); ctx.lineTo(-14,-3.2); ctx.lineTo(-14,3.2); ctx.closePath(); ctx.fill();
+  ctx.beginPath(); ctx.ellipse(8, 0, 6, 3.2*Math.abs(Math.cos(p.bank)), 0, 0, 7); ctx.fill();
+  ctx.restore();
+
+  // Smoke from a wing that has been chewed up.
+  const worst = Math.min(p.wingL, p.wingR);
+  if (worst < 55 && Math.random() < 0.28) {
+    const side = p.wingL < p.wingR ? 1 : -1;
+    const nx = -Math.sin(p.heading), ny = Math.cos(p.heading);
+    puffs.push({ x: p.x + nx*16*side, y: p.y + ny*16*side, alt: p.alt,
+                 r: 2+Math.random()*3, life: .55, vx:(Math.random()-.5)*40, vy:(Math.random()-.5)*40,
+                 c: p.hull < 40 ? "60,60,68" : "170,170,178" });
+  }
+}
+
+function drawLockReticle(p, other) {
+  if (p.dead || other.dead || p.lock <= 0.02) return;
+  const [x,y] = toScreen(other.x, other.y, other.alt);
+  const r = 30 * cam.z + 26 * (1 - p.lock) * cam.z;
+  ctx.save();
+  ctx.strokeStyle = p.locked ? PALETTE[p.i].key : `rgba(255,255,255,${0.25 + p.lock*0.4})`;
+  ctx.lineWidth = p.locked ? 2.4 : 1.4;
+  ctx.setLineDash(p.locked ? [] : [5,5]);
+  ctx.beginPath(); ctx.arc(x,y,r,0,7); ctx.stroke();
+  if (p.locked) {
+    ctx.setLineDash([]);
+    for (let k=0;k<4;k++) {
+      const a = k*Math.PI/2 + Math.PI/4;
+      ctx.beginPath();
+      ctx.moveTo(x+Math.cos(a)*r*0.75, y+Math.sin(a)*r*0.75);
+      ctx.lineTo(x+Math.cos(a)*r*1.25, y+Math.sin(a)*r*1.25);
+      ctx.stroke();
+    }
+  }
+  ctx.restore();
+}
+
+function drawWeapons() {
+  for (const b of bullets) {
+    const [x,y] = toScreen(b.x, b.y, b.alt);
+    const [px,py] = toScreen(b.x - b.vx*0.016, b.y - b.vy*0.016, b.alt);
+    ctx.strokeStyle = `rgba(255,240,190,${0.35 + 0.65*b.life/TUNE.cannonLife})`;
+    ctx.lineWidth = 2.2*cam.z + 0.6;
+    ctx.beginPath(); ctx.moveTo(px,py); ctx.lineTo(x,y); ctx.stroke();
+  }
+  for (const m of missiles) {
+    ctx.lineCap = "round";
+    for (let i=1;i<m.smoke.length;i++) {
+      const t = i/m.smoke.length;
+      const [x0,y0] = toScreen(m.smoke[i-1][0], m.smoke[i-1][1], m.alt);
+      const [x1,y1] = toScreen(m.smoke[i][0], m.smoke[i][1], m.alt);
+      ctx.strokeStyle = `rgba(235,235,240,${0.45*t})`;
+      ctx.lineWidth = (1 + 5*t)*cam.z;
+      ctx.beginPath(); ctx.moveTo(x0,y0); ctx.lineTo(x1,y1); ctx.stroke();
+    }
+    const [x,y] = toScreen(m.x, m.y, m.alt);
+    ctx.save(); ctx.translate(x,y); ctx.rotate(m.heading); ctx.scale(cam.z,cam.z);
+    ctx.fillStyle = "#1b232e";
+    ctx.fillRect(-9,-2.2, 18, 4.4);
+    ctx.fillStyle = "#ffd27a";
+    ctx.beginPath(); ctx.moveTo(-9,-2.2); ctx.lineTo(-16,0); ctx.lineTo(-9,2.2); ctx.closePath(); ctx.fill();
+    ctx.restore();
+  }
+  for (const f of puffs) {
+    const [x,y] = toScreen(f.x, f.y, f.alt);
+    ctx.fillStyle = `rgba(${f.c},${Math.max(0,f.life)*0.5})`;
+    ctx.beginPath(); ctx.arc(x,y,f.r*cam.z*(1.6-f.life*0.6),0,7); ctx.fill();
+  }
+}
+
+/* ---- HUD ------------------------------------------------------------------ */
+
+function bar(x, y, w, h, v, colour, bg="rgba(255,255,255,.12)") {
+  ctx.fillStyle = bg; ctx.fillRect(x,y,w,h);
+  ctx.fillStyle = colour; ctx.fillRect(x,y,w*Math.max(0,Math.min(1,v)),h);
+}
+
+/**
+ * A mirror of what the board's own AMOLED shows (hud.h: hull, per-wing, speed,
+ * two weapon cards). Drawn 448x368 at a scale, so the layout can be judged here
+ * before it is committed to the panel.
+ */
+function drawPanelMirror(p, ox, oy, s, align) {
+  const w = 448*s, h = 368*s;
+  const x = align === "right" ? ox - w : ox;
+  ctx.save(); ctx.translate(x, oy - h); ctx.scale(s, s);
+
+  ctx.fillStyle = "#05070a"; ctx.fillRect(0,0,448,368);
+  ctx.strokeStyle = "#1d2836"; ctx.lineWidth = 2; ctx.strokeRect(1,1,446,366);
+
+  ctx.fillStyle = "#6A7686"; ctx.font = "600 18px ui-monospace, monospace";
+  ctx.fillText(PALETTE[p.i].name, 20, 34);
+  ctx.textAlign = "right";
+  ctx.fillText(`${Math.round(p.speed)} KTS`, 428, 34);
+  ctx.textAlign = "left";
+
+  ctx.fillStyle = "#dfe7f2"; ctx.font = "700 54px ui-monospace, monospace";
+  ctx.fillText(`${Math.round(p.hull)}%`, 20, 100);
+  ctx.fillStyle = "#6A7686"; ctx.font = "600 16px ui-monospace, monospace";
+  ctx.fillText("HULL", 150, 100);
+
+  const hc = p.hull > 60 ? "#7dffb0" : p.hull > 30 ? "#F5A623" : "#FF4D4D";
+  bar(20, 116, 408, 14, p.hull/100, hc);
+
+  ctx.fillStyle = "#6A7686"; ctx.font = "600 14px ui-monospace, monospace";
+  ctx.fillText("WING L", 20, 158); ctx.textAlign = "right"; ctx.fillText("WING R", 428, 158); ctx.textAlign = "left";
+  bar(20, 166, 196, 12, p.wingL/100, p.wingL > 50 ? "#7fd4ff" : "#FF4D4D");
+  bar(232, 166, 196, 12, p.wingR/100, p.wingR > 50 ? "#7fd4ff" : "#FF4D4D");
+
+  const cards = [
+    { name: "CANNON", ammo: p.cannonAmmo, max: TUNE.cannonAmmo, hot: p.cannonCd > 0, key: "BOOT" },
+    { name: "MISSILE", ammo: p.missileAmmo, max: TUNE.missileAmmo, hot: p.locked, key: "PWR" },
+  ];
+  cards.forEach((c, i) => {
+    const cx = 20 + i*216;
+    ctx.fillStyle = "#121820"; ctx.fillRect(cx, 206, 196, 140);
+    ctx.strokeStyle = c.hot ? PALETTE[p.i].key : "#1d2836"; ctx.lineWidth = 2;
+    ctx.strokeRect(cx, 206, 196, 140);
+    ctx.fillStyle = "#dfe7f2"; ctx.font = "700 22px ui-monospace, monospace";
+    ctx.fillText(c.name, cx+16, 240);
+    ctx.fillStyle = c.ammo ? "#dfe7f2" : "#FF4D4D"; ctx.font = "700 44px ui-monospace, monospace";
+    ctx.fillText(String(c.ammo), cx+16, 296);
+    ctx.fillStyle = "#6A7686"; ctx.font = "600 14px ui-monospace, monospace";
+    ctx.fillText(c.key, cx+16, 328);
+    if (i === 1 && p.lock > 0 && !p.locked) bar(cx+16, 306, 164, 6, p.lock, "#F5A623");
+  });
+  ctx.restore();
+
+  ctx.fillStyle = "#4a5a70"; ctx.font = "10px ui-monospace, monospace";
+  ctx.textAlign = align === "right" ? "right" : "left";
+  ctx.fillText("board panel (mirror)", align === "right" ? ox : ox, oy + 12);
+  ctx.textAlign = "left";
+}
+
+/** A tag riding just above each plane, so the view alone is playable. */
+function drawTag(p) {
+  if (p.dead) return;
+  const [x,y] = toScreen(p.x, p.y, p.alt);
+  const w = 62, h = 5;
+  ctx.save();
+  ctx.translate(Math.round(x - w/2), Math.round(y - 34*cam.z - 20));
+  ctx.fillStyle = "rgba(5,10,18,.42)"; ctx.fillRect(-5,-11, w+10, 22);
+  ctx.fillStyle = PALETTE[p.i].key; ctx.font = "700 9px ui-monospace, monospace";
+  ctx.fillText(PALETTE[p.i].name, 0, -3);
+  bar(0, 2, w, h, p.hull/100, p.hull > 30 ? PALETTE[p.i].key : "#FF4D4D");
+  // Altitude ladder: the tick is the plane, the band is gun range.
+  ctx.fillStyle = "rgba(255,255,255,.2)"; ctx.fillRect(w+6, -9, 4, 20);
+  ctx.fillStyle = "#fff"; ctx.fillRect(w+4, 9 - p.alt*18, 8, 2);
+  ctx.restore();
+}
+
+/** Chevron at the screen edge for a plane the camera could not keep in frame. */
+function drawOffscreenMarker(p) {
+  if (p.dead) return;
+  const w = cv.width/DPR, h = cv.height/DPR, pad = 30;
+  const [x,y] = toScreen(p.x, p.y, p.alt);
+  if (x > pad && x < w-pad && y > pad && y < h-pad) return;
+  const cx = w/2, cy = h/2;
+  const a = Math.atan2(y-cy, x-cx);
+  const mx = Math.max(pad, Math.min(w-pad, cx + Math.cos(a)*w));
+  const my = Math.max(pad, Math.min(h-pad, cy + Math.sin(a)*h));
+  ctx.save();
+  ctx.translate(mx, my); ctx.rotate(a);
+  ctx.fillStyle = PALETTE[p.i].key;
+  ctx.beginPath(); ctx.moveTo(14,0); ctx.lineTo(-8,9); ctx.lineTo(-8,-9); ctx.closePath(); ctx.fill();
+  ctx.restore();
+}
+
+function drawScore() {
+  const w = cv.width/DPR;
+  ctx.save();
+  ctx.font = "700 26px ui-monospace, monospace";
+  ctx.textAlign = "center";
+  ctx.fillStyle = "rgba(5,10,18,.55)"; ctx.fillRect(w/2-90, 12, 180, 44);
+  ctx.fillStyle = PALETTE[0].key; ctx.fillText(String(scores[0]), w/2-44, 43);
+  ctx.fillStyle = "#57657a"; ctx.fillText("–", w/2, 43);
+  ctx.fillStyle = PALETTE[1].key; ctx.fillText(String(scores[1]), w/2+44, 43);
+  ctx.font = "600 10px ui-monospace, monospace"; ctx.fillStyle = "#8ea3bb";
+  ctx.fillText("FIRST TO 5", w/2, 68);
+  ctx.restore();
+  ctx.textAlign = "left";
+}
+
+/* ---- loop ----------------------------------------------------------------- */
+
+const bannerEl = document.getElementById("banner");
+let last = performance.now();
+function frame(now) {
+  let dt = Math.min(0.05, (now - last)/1000); last = now;
+  if (!paused) { simulate(dt); camUpdate(dt); }
+
+  ctx.setTransform(DPR,0,0,DPR,0,0);
+  drawSky();
+  for (const p of planes) {
+    drawTrail(p.trailL, PALETTE[p.i].trail, p.alt);
+    drawTrail(p.trailR, PALETTE[p.i].trail, p.alt);
+  }
+  drawWeapons();
+  drawLockReticle(planes[0], planes[1]);
+  drawLockReticle(planes[1], planes[0]);
+  for (const p of planes) drawPlane(p);
+  for (const p of planes) drawTag(p);
+  for (const p of planes) drawOffscreenMarker(p);
+  drawScore();
+
+  const h = cv.height/DPR, w = cv.width/DPR;
+  drawPanelMirror(planes[0], 16, h - 16, 0.30, "left");
+  drawPanelMirror(planes[1], w - 16, h - 16, 0.30, "right");
+
+  const label = over ? over : paused ? "paused" : null;
+  bannerEl.style.display = label ? "grid" : "none";
+  if (label) bannerEl.firstElementChild.textContent = label;
+
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+</script>

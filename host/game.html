@@ -39,26 +39,55 @@
 <div id="players"><p class="empty">Waiting for a controller to find this host…</p></div>
 
 <script>
-// Roll and pitch in the frame the pilot actually holds, not the board's native
-// portrait one. The panel runs at LV_DISPLAY_ROTATION_270, which maps screen
-// right to device +y and screen up to device +x; measured flat on a desk, this
-// IMU reads az = -1g screen-up, so its +z points into the screen and the axis
-// out towards the pilot is -az.
+// Attitude relative to a reference pose rather than to a hardcoded axis frame.
 //
-// Getting this wrong is what made roll snap between +180 and -180: computed in
-// the wrong frame, both arguments to atan2 sit near zero and the angle rides
-// on noise.
-const RIGHT = sample => sample[3];    //  ay
-const UP    = sample => sample[2];    //  ax
-const OUT   = sample => -sample[4];   // -az
+// Twice I derived which device axis points up from how the panel is rotated,
+// and twice it was wrong — the second time inverted, which is what made roll
+// snap between +180 and -180. Measured: held in the flying position this IMU
+// reads ax = -0.88, so screen-up is -ax. That constant is now only the default;
+// pressing Centre replaces it with wherever the board actually is, so how you
+// choose to hold it stops being something anyone has to get right.
+//
+// Working from a reference also kills the wrap: both angles come out of asin
+// about the reference, so level is 0 and nothing crosses a discontinuity until
+// you are past 90 degrees, which no pilot is.
+const LEVEL_DEFAULT = [-1, 0, 0];   // ax, ay, az when held level
+const SCREEN_RIGHT = [0, 1, 0];     // device +y, from the panel's 270 rotation
 
-function attitude(sample) {
-  const right = RIGHT(sample), up = UP(sample), out = OUT(sample);
+const dot = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+const scale = (a, k) => [a[0] * k, a[1] * k, a[2] * k];
+const sub = (a, b) => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+const cross = (a, b) => [
+  a[1] * b[2] - a[2] * b[1],
+  a[2] * b[0] - a[0] * b[2],
+  a[0] * b[1] - a[1] * b[0],
+];
+function unit(a) {
+  const length = Math.hypot(a[0], a[1], a[2]) || 1;
+  return scale(a, 1 / length);
+}
+
+// Two axes across the screen, perpendicular to whichever way gravity pointed
+// when this pose was taken as level.
+function frameFrom(level) {
+  const up = unit(level);
+  const right = unit(sub(SCREEN_RIGHT, scale(up, dot(SCREEN_RIGHT, up))));
+  return { up, right, forward: cross(up, right) };
+}
+
+const degrees = value => Math.asin(Math.max(-1, Math.min(1, value))) * 180 / Math.PI;
+
+function attitude(sample, frame) {
+  const gravity = unit([sample[2], sample[3], sample[4]]);
   return {
-    roll: Math.atan2(right, up) * 180 / Math.PI,
-    pitch: Math.atan2(out, Math.hypot(right, up)) * 180 / Math.PI,
+    roll: degrees(dot(gravity, frame.right)),
+    pitch: degrees(dot(gravity, frame.forward)),
   };
 }
+
+// The link still arrives in bursts every 20-80 ms. Easing towards the newest
+// reading costs a few milliseconds and stops the needles twitching between them.
+const smooth = (previous, next) => previous + (next - previous) * 0.25;
 
 const cards = new Map();
 
@@ -72,7 +101,8 @@ function card(name) {
     <div class="axis"><span>roll</span><div class="track"><div class="fill" data-roll></div></div><span class="value" data-roll-v>0°</span></div>
     <div class="axis"><span>pitch</span><div class="track"><div class="fill" data-pitch></div></div><span class="value" data-pitch-v>0°</span></div>
     <div class="triggers"><div class="trigger" data-left>BOOT</div><div class="trigger" data-right>PWR</div></div>
-    <button>Send a panel test</button>`;
+    <button data-centre>Centre on this pose</button>
+    <button data-panel>Send a panel test</button>`;
   root.querySelector('.name').textContent = name;
   const list = document.getElementById('players');
   list.querySelector('.empty')?.remove();
@@ -88,8 +118,15 @@ function card(name) {
     rollValue: root.querySelector('[data-roll-v]'),
     pitchValue: root.querySelector('[data-pitch-v]'),
     index: cards.size,
+    frame: frameFrom(LEVEL_DEFAULT),
+    roll: 0,
+    pitch: 0,
+    last: null,
   };
-  root.querySelector('button').onclick = () => fetch('/', {
+  root.querySelector('[data-centre]').onclick = () => {
+    if (entry.last) entry.frame = frameFrom([entry.last[2], entry.last[3], entry.last[4]]);
+  };
+  root.querySelector('[data-panel]').onclick = () => fetch('/', {
     method: 'POST',
     body: JSON.stringify({
       player: entry.index,
@@ -118,9 +155,12 @@ new EventSource('/stream').onmessage = event => {
     const last = player.samples.at(-1);
     if (!last) continue;
 
-    const { roll, pitch } = attitude(last);
-    setAxis(view.rollFill, view.rollValue, roll);
-    setAxis(view.pitchFill, view.pitchValue, pitch);
+    view.last = last;
+    const { roll, pitch } = attitude(last, view.frame);
+    view.roll = smooth(view.roll, roll);
+    view.pitch = smooth(view.pitch, pitch);
+    setAxis(view.rollFill, view.rollValue, view.roll);
+    setAxis(view.pitchFill, view.pitchValue, view.pitch);
 
     view.left.classList.toggle('on', last[8] === 1);
     view.right.classList.toggle('on', last[9] === 1);

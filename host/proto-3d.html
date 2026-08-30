@@ -1,0 +1,1069 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Dogfight — Direction B (split screen, 3D)</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+  :root { color-scheme: dark; }
+  html, body { margin: 0; height: 100%; background: #05070a; overflow: hidden;
+               font: 13px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; color: #dfe7f2; }
+  canvas { display: block; position: fixed; inset: 0; width: 100vw; height: 100vh; }
+  #hud { pointer-events: none; }
+  #help {
+    position: fixed; left: 50%; transform: translateX(-50%); top: 16px; padding: 12px 18px;
+    background: rgba(6,10,16,.88); border: 1px solid #1d2836; border-radius: 8px;
+    backdrop-filter: blur(6px); pointer-events: none; z-index: 3;
+  }
+  #help h1 { font-size: 12px; margin: 0 0 8px; letter-spacing: .12em; text-transform: uppercase; color: #7fd4ff; }
+  #help table { border-collapse: collapse; font-size: 12px; }
+  #help td { padding: 1px 12px 1px 0; }
+  #help td:first-child { color: #8ea3bb; white-space: nowrap; }
+  #help p { margin: 8px 0 0; color: #8ea3bb; font-size: 12px; }
+  kbd { background: #16202c; border: 1px solid #263243; border-radius: 3px; padding: 0 4px; }
+  #conn { position: fixed; right: 14px; top: 14px; padding: 5px 9px; border-radius: 6px; z-index: 3;
+          background: rgba(6,10,16,.86); border: 1px solid #1d2836; color: #8ea3bb; font-size: 11px; }
+  #conn.live { color: #7dffb0; border-color: #1d4a33; }
+</style>
+
+<canvas id="gl"></canvas>
+<canvas id="hud"></canvas>
+<div id="conn">board: offline — keyboard harness</div>
+<div id="help">
+  <h1>Direction B — split screen, 3D</h1>
+  <table>
+    <tr><td><kbd>A</kbd>/<kbd>D</kbd> <kbd>W</kbd>/<kbd>S</kbd></td><td>P1 roll / pitch (board: tilt)</td>
+        <td><kbd>F</kbd> / <kbd>G</kbd></td><td>P1 cannon / missile (BOOT / PWR)</td></tr>
+    <tr><td>arrows</td><td>P2 roll / pitch</td>
+        <td><kbd>,</kbd> / <kbd>.</kbd></td><td>P2 cannon / missile</td></tr>
+    <tr><td><kbd>1</kbd> / <kbd>2</kbd></td><td>toggle bot</td>
+        <td><kbd>Space</kbd> <kbd>R</kbd> <kbd>H</kbd></td><td>pause · restart · hide</td></tr>
+  </table>
+  <p>Idle 6 s and both planes fly themselves (attract mode).</p>
+</div>
+
+<script>
+"use strict";
+
+/* ===========================================================================
+   PART 1 — CONTROLLER INPUT
+   Same fusion core as proto-2d.html, lifted from ../magic-wand/host/viewer.html.
+   Duplicated rather than shared because each prototype has to open standalone
+   with no fetches of any kind.
+   =========================================================================== */
+
+const qnorm4 = q => { const n = Math.hypot(q[0],q[1],q[2],q[3]) || 1; return [q[0]/n,q[1]/n,q[2]/n,q[3]/n]; };
+
+// firmware/main/hud.c runs LV_DISPLAY_ROTATION_270, so the frame the pilot sees
+// is rotated 90 deg CCW from the IMU's: Xland = -Yimu, Yland = +Ximu, Zland = Zimu.
+const AXIS_REMAPS = {
+  "rot270 (hud.c default)": v => [-v[1],  v[0], v[2]],
+  "rot90":                  v => [ v[1], -v[0], v[2]],
+  "rot0":                   v => [ v[0],  v[1], v[2]],
+  "rot180":                 v => [-v[0], -v[1], v[2]],
+};
+let axisRemap = AXIS_REMAPS["rot270 (hud.c default)"];
+
+class Fusion {
+  constructor() {
+    this.q = [1,0,0,0]; this.beta = 0.08;
+    this.gravityEst = [0,0,1];
+    this.bias = [0,0,0]; this.biasAcc = [0,0,0]; this.biasN = 0; this.biasDone = false;
+    this.gravityMag = 0; this.veryStillSince = performance.now();
+    this.scales = { acc: 8/32768, gyr: 2048/32768 };
+    this.lastT = null; this.level = null;
+  }
+  setHeader(h) {
+    if (!h) return;
+    if (h.acc_scale_g) this.scales.acc = +h.acc_scale_g;
+    if (h.gyr_scale_dps) this.scales.gyr = +h.gyr_scale_dps;
+  }
+  seedFromAccel(a) {
+    const n = Math.hypot(...a); if (n < 1e-6) return;
+    const [x,y,z] = [a[0]/n, a[1]/n, a[2]/n];
+    if (z >  0.999999) { this.q = [1,0,0,0]; return; }
+    if (z < -0.999999) { this.q = [0,1,0,0]; return; }
+    const axis = [y,-x,0], an = Math.hypot(...axis);
+    const angle = Math.acos(Math.max(-1, Math.min(1, z))), sh = Math.sin(angle/2);
+    this.q = qnorm4([Math.cos(angle/2), axis[0]/an*sh, axis[1]/an*sh, axis[2]/an*sh]);
+  }
+  madgwick(gx, gy, gz, ax, ay, az, dt) {
+    gx *= Math.PI/180; gy *= Math.PI/180; gz *= Math.PI/180;
+    let [qw,qx,qy,qz] = this.q;
+    let dw = 0.5*(-qx*gx - qy*gy - qz*gz);
+    let dx = 0.5*( qw*gx + qy*gz - qz*gy);
+    let dy = 0.5*( qw*gy - qx*gz + qz*gx);
+    let dz = 0.5*( qw*gz + qx*gy - qy*gx);
+    const an = Math.hypot(ax,ay,az);
+    if (an > 1e-6) {
+      ax/=an; ay/=an; az/=an;
+      this.gravityEst = [2*(qx*qz - qw*qy), 2*(qw*qx + qy*qz), 2*(0.5 - qx*qx - qy*qy)];
+      const f1 = this.gravityEst[0]-ax, f2 = this.gravityEst[1]-ay, f3 = this.gravityEst[2]-az;
+      let sw = -2*qy*f1 + 2*qx*f2;
+      let sx =  2*qz*f1 + 2*qw*f2 - 4*qx*f3;
+      let sy = -2*qw*f1 + 2*qz*f2 - 4*qy*f3;
+      let sz =  2*qx*f1 + 2*qy*f2;
+      const sn = Math.hypot(sw,sx,sy,sz);
+      if (sn > 1e-9) { const b = this.beta; dw -= b*sw/sn; dx -= b*sx/sn; dy -= b*sy/sn; dz -= b*sz/sn; }
+    }
+    this.q = qnorm4([qw+dw*dt, qx+dx*dt, qy+dy*dt, qz+dz*dt]);
+  }
+  sample(s) {
+    const [, t_us, ax, ay, az, gx, gy, gz] = s;
+    let dt = 1/200;
+    if (this.lastT !== null) {
+      let d = (t_us - this.lastT)/1e6;
+      if (d < 0) d += 2**32/1e6;                  // 32-bit timestamp wrap
+      if (d > 0 && d < 0.2) dt = d;
+    }
+    this.lastT = t_us;
+    const acc = [ax*this.scales.acc, ay*this.scales.acc, az*this.scales.acc];
+    const g = [gx*this.scales.gyr, gy*this.scales.gyr, gz*this.scales.gyr];
+    if (!this.biasDone) {
+      for (let i=0;i<3;i++) this.biasAcc[i] += g[i];
+      if (++this.biasN >= 200) { this.bias = this.biasAcc.map(v=>v/this.biasN); this.seedFromAccel(acc); this.biasDone = true; }
+    }
+    const gyro = [g[0]-this.bias[0], g[1]-this.bias[1], g[2]-this.bias[2]];
+    this.madgwick(gyro[0],gyro[1],gyro[2], acc[0],acc[1],acc[2], dt);
+    const accMag = Math.hypot(...acc);
+    if (this.gravityMag === 0) this.gravityMag = accMag;
+    if (Math.abs(accMag - this.gravityMag) < 0.15)
+      this.gravityMag += (accMag - this.gravityMag) * (1 - Math.exp(-dt/0.4));
+    const spin = Math.hypot(...gyro);
+    if (!(Math.abs(accMag-this.gravityMag) < 0.03 && spin < 2.5)) this.veryStillSince = performance.now();
+    if (performance.now() - this.veryStillSince > 400 && this.biasDone) {
+      const k = 1 - Math.exp(-dt/1.5);
+      for (let i=0;i<3;i++) this.bias[i] += gyro[i]*k;
+    }
+  }
+  recentre() { this.level = this.gravityEst.slice(); }
+  tilt() {
+    const u = axisRemap(this.gravityEst);
+    const l = axisRemap(this.level || [0,0,1]);
+    const bank  = Math.atan2(u[0], Math.max(0.15,u[2])) - Math.atan2(l[0], Math.max(0.15,l[2]));
+    const climb = Math.atan2(u[1], Math.max(0.15,u[2])) - Math.atan2(l[1], Math.max(0.15,l[2]));
+    const span = Math.PI/4;
+    const clamp = v => Math.max(-1, Math.min(1, v/span));
+    return { bank: clamp(bank), climb: clamp(climb) };
+  }
+}
+
+class Stick {
+  constructor() { this.bank = 0; this.climb = 0; this.fusion = new Fusion();
+                  this.level = [0,0]; this.edge = [false,false]; this.live = false; }
+  feed(header, samples) {
+    this.fusion.setHeader(header);
+    for (const s of samples) {
+      this.fusion.sample(s);
+      const bl = s[8]|0, br = s[9]|0;
+      if (bl && !this.level[0]) this.edge[0] = true;   // rising edge only: one shot per press
+      if (br && !this.level[1]) this.edge[1] = true;
+      this.level = [bl, br];
+    }
+    const t = this.fusion.tilt();
+    this.bank = t.bank; this.climb = t.climb; this.live = true;
+  }
+  press(i) { this.edge[i] = true; }
+  takeEdge(i) { const e = this.edge[i]; this.edge[i] = false; return e; }
+}
+
+const sticks = [new Stick(), new Stick()];
+const bots = [true, true];
+
+const connEl = document.getElementById("conn");
+(function openStream() {
+  let es; try { es = new EventSource("/stream"); } catch { return; }
+  es.onmessage = ev => {
+    let obj; try { obj = JSON.parse(ev.data); } catch { return; }
+    // Accepts the two-player {players:[...]} envelope and the single-player
+    // {h,dropped,s} envelope host/dogfight.py inherited from magic-wand.
+    if (Array.isArray(obj.players)) obj.players.forEach((p,i) => { if (sticks[i]) sticks[i].feed(p.header, p.samples || []); });
+    else if (Array.isArray(obj.s)) sticks[0].feed(obj.h, obj.s);
+    connEl.textContent = "board: live"; connEl.className = "live";
+    bots[0] = false; if (sticks[1].live) bots[1] = false;
+  };
+  es.onerror = () => {
+      connEl.textContent = "board: offline — keyboard harness"; connEl.className = "";
+      // Without this the browser reconnects a few times a second forever and the
+      // console fills with 404s on any host that is not serving the game.
+      es.close();
+      setTimeout(openStream, 5000);
+    };
+})();
+
+/* ===========================================================================
+   PART 2 — KEYBOARD HARNESS
+   =========================================================================== */
+
+const keys = new Set();
+let lastHumanInput = 0, paused = false;
+
+addEventListener("keydown", e => {
+  if (e.repeat) { e.preventDefault(); return; }
+  const k = e.key.toLowerCase(); keys.add(k); lastHumanInput = performance.now();
+  if (k === "f") { sticks[0].press(0); bots[0] = false; }
+  if (k === "g") { sticks[0].press(1); bots[0] = false; }
+  if (k === ",") { sticks[1].press(0); bots[1] = false; }
+  if (k === ".") { sticks[1].press(1); bots[1] = false; }
+  if ("adws".includes(k)) bots[0] = false;
+  if (k.startsWith("arrow")) bots[1] = false;
+  if (k === "1") bots[0] = !bots[0];
+  if (k === "2") bots[1] = !bots[1];
+  if (k === " ") paused = !paused;
+  if (k === "r") reset();
+  if (k === "c") sticks.forEach(s => s.fusion.recentre());
+  if (k === "h") { const h = document.getElementById("help"); h.style.display = h.style.display === "none" ? "" : "none"; }
+  if ([" ","arrowup","arrowdown","arrowleft","arrowright"].includes(k)) e.preventDefault();
+});
+addEventListener("keyup", e => keys.delete(e.key.toLowerCase()));
+
+function harness() {
+  if (!sticks[0].live) {
+    sticks[0].bank  = (keys.has("d")?1:0) - (keys.has("a")?1:0);
+    sticks[0].climb = (keys.has("w")?1:0) - (keys.has("s")?1:0);
+  }
+  if (!sticks[1].live) {
+    sticks[1].bank  = (keys.has("arrowright")?1:0) - (keys.has("arrowleft")?1:0);
+    sticks[1].climb = (keys.has("arrowup")?1:0) - (keys.has("arrowdown")?1:0);
+  }
+  if (performance.now() - lastHumanInput > 6000 && !sticks[0].live && !sticks[1].live) { bots[0] = true; bots[1] = true; }
+}
+
+/* ===========================================================================
+   PART 3 — MATHS
+   Column-major 4x4, same convention as GL expects, so matrices go straight into
+   uniformMatrix4fv with transpose=false.
+   =========================================================================== */
+
+function mat4() { return new Float32Array([1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1]); }
+function mul(out, a, b) {
+  for (let c = 0; c < 4; c++) for (let r = 0; r < 4; r++) {
+    out[c*4+r] = a[r]*b[c*4] + a[4+r]*b[c*4+1] + a[8+r]*b[c*4+2] + a[12+r]*b[c*4+3];
+  }
+  return out;
+}
+function perspective(out, fovy, aspect, near, far) {
+  const f = 1/Math.tan(fovy/2), nf = 1/(near-far);
+  out.set([f/aspect,0,0,0, 0,f,0,0, 0,0,(far+near)*nf,-1, 0,0,2*far*near*nf,0]);
+  return out;
+}
+function lookAt(out, eye, at, up) {
+  let zx = eye[0]-at[0], zy = eye[1]-at[1], zz = eye[2]-at[2];
+  let l = Math.hypot(zx,zy,zz) || 1; zx/=l; zy/=l; zz/=l;
+  let xx = up[1]*zz - up[2]*zy, xy = up[2]*zx - up[0]*zz, xz = up[0]*zy - up[1]*zx;
+  l = Math.hypot(xx,xy,xz) || 1; xx/=l; xy/=l; xz/=l;
+  const yx = zy*xz - zz*xy, yy = zz*xx - zx*xz, yz = zx*xy - zy*xx;
+  out.set([xx,yx,zx,0, xy,yy,zy,0, xz,yz,zz,0,
+           -(xx*eye[0]+xy*eye[1]+xz*eye[2]),
+           -(yx*eye[0]+yy*eye[1]+yz*eye[2]),
+           -(zx*eye[0]+zy*eye[1]+zz*eye[2]), 1]);
+  return out;
+}
+/** Model matrix from a plane's basis vectors (forward / right / up) and position. */
+function basisModel(out, fwd, right, up, pos, scale) {
+  const s = scale === undefined ? 1 : scale;
+  out.set([ fwd[0]*s, fwd[1]*s, fwd[2]*s, 0,
+            right[0]*s, right[1]*s, right[2]*s, 0,
+            up[0]*s, up[1]*s, up[2]*s, 0,
+            pos[0], pos[1], pos[2], 1 ]);
+  return out;
+}
+const v3 = { add:(a,b)=>[a[0]+b[0],a[1]+b[1],a[2]+b[2]],
+             sub:(a,b)=>[a[0]-b[0],a[1]-b[1],a[2]-b[2]],
+             mul:(a,s)=>[a[0]*s,a[1]*s,a[2]*s],
+             dot:(a,b)=>a[0]*b[0]+a[1]*b[1]+a[2]*b[2],
+             cross:(a,b)=>[a[1]*b[2]-a[2]*b[1], a[2]*b[0]-a[0]*b[2], a[0]*b[1]-a[1]*b[0]],
+             len:a=>Math.hypot(a[0],a[1],a[2]),
+             norm:a=>{const l=Math.hypot(a[0],a[1],a[2])||1; return [a[0]/l,a[1]/l,a[2]/l];} };
+
+/** Rotate vector v about unit axis k by angle (Rodrigues). */
+function rotAbout(v, k, angle) {
+  const c = Math.cos(angle), s = Math.sin(angle);
+  const kv = v3.cross(k, v), kd = v3.dot(k, v);
+  return [ v[0]*c + kv[0]*s + k[0]*kd*(1-c),
+           v[1]*c + kv[1]*s + k[1]*kd*(1-c),
+           v[2]*c + kv[2]*s + k[2]*kd*(1-c) ];
+}
+
+/* ===========================================================================
+   PART 4 — WEBGL
+   Hand-rolled WebGL1, no library. The scene is a heightless ground plane, a few
+   thousand extruded boxes and half a dozen low-poly aircraft; one flat-shaded
+   fogged shader draws all of it. Vendoring three.js would have added ~600 KB of
+   dependency to the repo to buy a scene graph and a material system this does
+   not use, and the brief wants the host to serve these files off a laptop with
+   no network at all.
+   =========================================================================== */
+
+const glcv = document.getElementById("gl");
+const gl = glcv.getContext("webgl", { antialias: true, depth: true, alpha: false });
+if (!gl) document.body.innerHTML = "<p style='padding:40px'>WebGL is not available in this browser.</p>";
+
+const VERT = `
+attribute vec3 aPos;
+attribute vec3 aNormal;
+attribute vec3 aColor;
+uniform mat4 uModel, uView, uProj;
+uniform vec3 uTint;
+uniform float uUnlit;      // 1.0 = pass the vertex colour straight through
+varying vec3 vColor;
+varying float vFog;
+void main() {
+  vec4 world = uModel * vec4(aPos, 1.0);
+  vec4 eye = uView * world;
+  gl_Position = uProj * eye;
+  // Flat-ish directional light, plus a cool sky bounce from above so vertical
+  // faces do not read as black holes against the city.
+  vec3 n = normalize(mat3(uModel) * aNormal);
+  if (dot(normalize(mat3(uView) * n), normalize(eye.xyz)) > 0.0) n = -n;
+  float key = max(dot(n, normalize(vec3(0.45, 0.75, 0.35))), 0.0);
+  float sky = 0.5 + 0.5 * n.y;
+  vec3 lit = aColor * uTint * (0.42 + 0.58*key) + vec3(0.13,0.17,0.23) * sky;
+  vColor = mix(lit, aColor, uUnlit);
+  vFog = mix(clamp(length(eye.xyz) / 9000.0, 0.0, 1.0), 0.0, uUnlit);
+}`;
+
+const FRAG = `
+precision mediump float;
+varying vec3 vColor;
+varying float vFog;
+uniform vec3 uFog;
+void main() {
+  gl_FragColor = vec4(mix(vColor, uFog, vFog*vFog), 1.0);
+}`;
+
+function compile(type, src) {
+  const s = gl.createShader(type);
+  gl.shaderSource(s, src); gl.compileShader(s);
+  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s));
+  return s;
+}
+const prog = gl.createProgram();
+gl.attachShader(prog, compile(gl.VERTEX_SHADER, VERT));
+gl.attachShader(prog, compile(gl.FRAGMENT_SHADER, FRAG));
+gl.linkProgram(prog);
+if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(prog));
+gl.useProgram(prog);
+gl.uniform1f(gl.getUniformLocation(prog,"uUnlit"), 0);
+const A = { pos: gl.getAttribLocation(prog,"aPos"), normal: gl.getAttribLocation(prog,"aNormal"), color: gl.getAttribLocation(prog,"aColor") };
+const U = { model: gl.getUniformLocation(prog,"uModel"), view: gl.getUniformLocation(prog,"uView"),
+            proj: gl.getUniformLocation(prog,"uProj"), tint: gl.getUniformLocation(prog,"uTint"), unlit: gl.getUniformLocation(prog,"uUnlit"),
+            fog: gl.getUniformLocation(prog,"uFog") };
+
+/** Accumulates interleaved pos/normal/colour triangles, then uploads once. */
+class MeshBuilder {
+  constructor() { this.data = []; }
+  tri(a, b, c, colour) {
+    const n = v3.norm(v3.cross(v3.sub(b,a), v3.sub(c,a)));
+    for (const p of [a,b,c]) this.data.push(p[0],p[1],p[2], n[0],n[1],n[2], colour[0],colour[1],colour[2]);
+  }
+  quad(a, b, c, d, colour) { this.tri(a,b,c,colour); this.tri(a,c,d,colour); }
+  /** Axis-aligned box; y is up, sides get a slight tone split so edges read. */
+  box(x, y, z, sx, sy, sz, colour) {
+    const x0=x-sx, x1=x+sx, y0=y-sy, y1=y+sy, z0=z-sz, z1=z+sz;
+    const top = colour.map(v => Math.min(1, v*1.25));
+    const side = colour, dark = colour.map(v => v*0.78);
+    this.quad([x0,y1,z0],[x0,y1,z1],[x1,y1,z1],[x1,y1,z0], top);
+    this.quad([x0,y0,z1],[x0,y1,z1],[x1,y1,z1],[x1,y0,z1], side);
+    this.quad([x1,y0,z0],[x1,y1,z0],[x0,y1,z0],[x0,y0,z0], side);
+    this.quad([x1,y0,z1],[x1,y1,z1],[x1,y1,z0],[x1,y0,z0], dark);
+    this.quad([x0,y0,z0],[x0,y1,z0],[x0,y1,z1],[x0,y0,z1], dark);
+  }
+  upload() {
+    const buf = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(this.data), gl.STATIC_DRAW);
+    return { buf, count: this.data.length / 9 };
+  }
+}
+
+function drawMesh(mesh, model, tint) {
+  gl.bindBuffer(gl.ARRAY_BUFFER, mesh.buf);
+  const stride = 9*4;
+  gl.enableVertexAttribArray(A.pos);    gl.vertexAttribPointer(A.pos, 3, gl.FLOAT, false, stride, 0);
+  gl.enableVertexAttribArray(A.normal); gl.vertexAttribPointer(A.normal, 3, gl.FLOAT, false, stride, 12);
+  gl.enableVertexAttribArray(A.color);  gl.vertexAttribPointer(A.color, 3, gl.FLOAT, false, stride, 24);
+  gl.uniformMatrix4fv(U.model, false, model);
+  gl.uniform3fv(U.tint, tint || [1,1,1]);
+  gl.drawArrays(gl.TRIANGLES, 0, mesh.count);
+}
+
+/* ---- the city ------------------------------------------------------------- */
+// Procedural London-shaped rather than London-accurate: a river meandering
+// west-to-east, low brick blocks either side of it, two clusters of towers where
+// the City and Canary Wharf sit, a few bridges, and a wheel on the south bank.
+// It is recognisable at 250 knots, which is the only fidelity a dogfight needs.
+
+let seed = 0x5eed1;
+const rnd = () => (seed = (seed*1664525 + 1013904223) >>> 0) / 4294967296;
+
+const CITY = 9000;                          // half-extent of the built area
+function riverZ(x) {                        // the Thames, as a function of easting
+  return 900*Math.sin(x/2600) + 520*Math.sin(x/900 + 1.7) - 260;
+}
+
+function buildCity() {
+  const m = new MeshBuilder();
+  // Ground. One big quad in park-green, with the river cut as a ribbon of strips
+  // so it can bend.
+  m.quad([-CITY*1.6,0,-CITY*1.6], [-CITY*1.6,0,CITY*1.6], [CITY*1.6,0,CITY*1.6], [CITY*1.6,0,-CITY*1.6], [0.30,0.34,0.28]);
+  const step = 260;
+  for (let x = -CITY*1.4; x < CITY*1.4; x += step) {
+    const w = 320 + 90*Math.sin(x/1700);
+    const z0 = riverZ(x), z1 = riverZ(x+step);
+    m.quad([x,3,z0-w], [x,3,z0+w], [x+step,3,z1+w], [x+step,3,z1-w], [0.13,0.22,0.31]);
+  }
+
+  const clusters = [ {x: 900, z: -400, r: 1500, h: 560},      // the City
+                     {x: 5200, z: 300, r: 1000, h: 520},      // Canary Wharf
+                     {x: -3800, z: -900, r: 900, h: 190} ];   // west end, lower
+  const blockColours = [[0.52,0.47,0.44],[0.46,0.43,0.42],[0.56,0.50,0.45],[0.42,0.44,0.47]];
+
+  for (let gx = -CITY; gx <= CITY; gx += 420) {
+    for (let gz = -CITY; gz <= CITY; gz += 420) {
+      const x = gx + (rnd()-0.5)*180, z = gz + (rnd()-0.5)*180;
+      if (Math.abs(z - riverZ(x)) < 420) continue;            // nothing in the water
+      let h = 45 + rnd()*110;
+      for (const c of clusters) {
+        const d = Math.hypot(x-c.x, z-c.z);
+        if (d < c.r) h += (1 - d/c.r) * c.h * (0.35 + rnd()*0.9);
+      }
+      if (rnd() < 0.14) continue;                              // parks and gaps
+      const sx = 70 + rnd()*90, sz = 70 + rnd()*90;
+      m.box(x, h/2, z, sx, h/2, sz, blockColours[(rnd()*4)|0]);
+    }
+  }
+
+  // Landmarks worth recognising from the air.
+  for (const bx of [-2600, -900, 700, 2400, 4200]) {           // bridges
+    const z = riverZ(bx);
+    m.box(bx, 26, z, 60, 8, 460, [0.62,0.60,0.57]);
+    m.box(bx, 60, z-300, 40, 34, 40, [0.62,0.60,0.57]);
+    m.box(bx, 60, z+300, 40, 34, 40, [0.62,0.60,0.57]);
+  }
+  // A tapering tower for the Shard, as stacked shrinking boxes.
+  for (let i = 0; i < 9; i++) {
+    const t = i/9, w = 95*(1-t*0.85);
+    m.box(1500, 40 + i*80, 240, w, 40, w, [0.60,0.66,0.72]);
+  }
+  // The wheel: a ring of boxes on the south bank.
+  const wx = -1500, wz = riverZ(wx) + 300;
+  for (let i = 0; i < 22; i++) {
+    const a = i/22 * Math.PI*2;
+    m.box(wx, 200 + Math.sin(a)*195, wz + Math.cos(a)*195, 14, 14, 14, [0.75,0.76,0.80]);
+  }
+  return m.upload();
+}
+
+/* ---- aircraft ------------------------------------------------------------- */
+// Local frame: +x forward (nose), +y up, +z right wing. The model matrix is
+// therefore built straight from the aircraft's own basis with no extra rotation.
+function buildPlane(bodyColour, keyColour) {
+  const m = new MeshBuilder();
+  const b = bodyColour, k = keyColour;
+
+  // Fuselage: a hexagonal prism that fattens at the wing root and tapers to a nose.
+  const seg = [[-16,1.5], [-9,4.4], [4,4.2], [13,2.6], [20,0.9]];
+  for (let i = 0; i < seg.length-1; i++) {
+    const [x0,r0] = seg[i], [x1,r1] = seg[i+1];
+    for (let t = 0; t < 6; t++) {
+      const a0 = t/6*Math.PI*2, a1 = (t+1)/6*Math.PI*2;
+      m.quad([x0, Math.sin(a0)*r0, Math.cos(a0)*r0],
+             [x1, Math.sin(a0)*r1, Math.cos(a0)*r1],
+             [x1, Math.sin(a1)*r1, Math.cos(a1)*r1],
+             [x0, Math.sin(a1)*r0, Math.cos(a1)*r0], b);
+    }
+  }
+
+  // Swept delta wing each side: root chord x 7..-9 at z=0, tip chord x -3..-12
+  // at the wingtip. Built as a thin closed slab so it is visible edge-on.
+  for (const sgn of [1,-1]) {
+    const tip = 17*sgn;
+    const top = 0.9, bot = -0.9;
+    const rootF = [8,0,0], rootB = [-10,0,0], tipF = [-4,0,tip], tipB = [-13,0,tip];
+    const at = (p,y) => [p[0], y, p[2]];
+    // Upper and lower surfaces of a thin slab.
+    m.tri(at(rootF,top), at(tipF,top), at(rootB,top), b);
+    m.tri(at(tipF,top), at(tipB,top), at(rootB,top), b);
+    m.tri(at(rootF,bot), at(rootB,bot), at(tipF,bot), b);
+    m.tri(at(tipF,bot), at(rootB,bot), at(tipB,bot), b);
+    // Leading edge in the player colour: at range this stripe is the only thing
+    // that says which aircraft you are looking at.
+    m.quad(at(rootF,bot), at(tipF,bot), at(tipF,top), at(rootF,top), k);
+    m.quad(at(tipF,top), at(tipF,bot), at(tipB,bot), at(tipB,top), b);
+    m.quad(at(rootB,top), at(tipB,top), at(tipB,bot), at(rootB,bot), b);
+  }
+
+  // Tail fin, in the player colour so the silhouette is keyed from dead astern.
+  m.quad([-16,0,0], [-8,0,0], [-11,14,0], [-17,14,0], k);
+  m.quad([-8,0,0], [-16,0,0], [-17,14,0], [-11,14,0], k);
+  // Horizontal stabilisers.
+  for (const sgn of [1,-1]) {
+    m.tri([-10,0.6,0], [-16,0.6,8*sgn], [-16,0.6,0], b);
+    m.tri([-10,-0.6,0], [-16,-0.6,0], [-16,-0.6,8*sgn], b);
+  }
+  m.box(3, 4.2, 0, 5.0, 1.7, 2.6, [0.18,0.30,0.44]);   // canopy
+  return m.upload();
+}
+
+/**
+ * A banded hemisphere, drawn unlit and depth-write-off before anything else.
+ * Bands rather than a single colour so there is a real horizon gradient to fly
+ * against, which is what tells a rolling player which way is up.
+ */
+function buildSky(horizon, zenith) {
+  const m = new MeshBuilder();
+  const bands = 24, rings = 24;
+  for (let i = 0; i < bands; i++) {
+    const t0 = i/bands, t1 = (i+1)/bands;
+    const e0 = -0.12 + t0*(Math.PI/2 + 0.12), e1 = -0.12 + t1*(Math.PI/2 + 0.12);
+    const colour = horizon.map((c, k) => c + (zenith[k]-c) * Math.pow((t0+t1)/2, 0.65));
+    for (let j = 0; j < rings; j++) {
+      const a0 = j/rings*Math.PI*2, a1 = (j+1)/rings*Math.PI*2;
+      const P = (e,a) => [Math.cos(e)*Math.cos(a), Math.sin(e), Math.cos(e)*Math.sin(a)];
+      m.quad(P(e0,a0), P(e0,a1), P(e1,a1), P(e1,a0), colour);
+    }
+  }
+  return m.upload();
+}
+
+const SKY_TOP = [0.16,0.36,0.66], SKY_HAZE = [0.74,0.82,0.87];
+let cityMesh, planeMesh, missileMesh, cubeMesh, skyMesh;
+function buildAll() {
+  cityMesh = buildCity();
+  planeMesh = buildPlane([0.72,0.73,0.76], [1,1,1]);
+  const mm = new MeshBuilder();
+  mm.box(0,0,0, 7, 1.1, 1.1, [0.85,0.85,0.88]);
+  mm.box(-7,0,0, 2, 2.4, 2.4, [1.0,0.72,0.30]);
+  missileMesh = mm.upload();
+  const cb = new MeshBuilder(); cb.box(0,0,0, 1,1,1, [1,1,1]);
+  cubeMesh = cb.upload();
+  skyMesh = buildSky(SKY_HAZE, SKY_TOP);
+}
+buildAll();
+
+/* ===========================================================================
+   PART 5 — FLIGHT + FIGHT
+   =========================================================================== */
+
+const TUNE = {
+  rollRate: 2.9,                 // rad/s at full stick
+  pitchRate: 1.35,
+  speedMin: 190, speedMax: 460, speedBase: 300,
+  gravityBleed: 130,             // knots gained per unit of nose-down, roughly
+  floor: 60,                     // hard deck; below this the ground bites
+  ceiling: 3400,
+  cannonSpeed: 2400, cannonLife: 1.1, cannonDamage: 4.5, cannonAmmo: 140,
+  cannonCooldown: 0.085, cannonSpread: 0.012,
+  missileSpeed: 700, missileAccel: 420, missileTurn: 1.9, missileLife: 8,
+  missileDamage: 30, missileAmmo: 4, missileCooldown: 0.7,
+  lockCone: Math.cos(0.60), lockRange: 2600, lockTime: 1.0,
+};
+const PALETTE = [
+  { key: [1.0,0.70,0.28], css: "#ffb347", name: "AMBER" },
+  { key: [0.35,0.82,1.0], css: "#5ad1ff", name: "AZURE" },
+];
+
+let planes = [], bullets = [], missiles = [], sparks = [], scores = [0,0], over = null, overAt = 0;
+
+function makePlane(i) {
+  const heading = i === 0 ? 0.3 : Math.PI - 0.3;
+  return {
+    i,
+    pos: [i === 0 ? -2200 : 2200, 620 + i*220, i === 0 ? -1400 : 1200],
+    fwd: [Math.cos(heading), 0, Math.sin(heading)],
+    up: [0,1,0],
+    speed: TUNE.speedBase,
+    roll: 0,
+    hull: 100, wingL: 100, wingR: 100,
+    cannonAmmo: TUNE.cannonAmmo, missileAmmo: TUNE.missileAmmo,
+    cannonCd: 0, missileCd: 0, lock: 0, locked: false,
+    trail: [], hitFlash: 0, dead: false, respawn: 0, botFireCd: 0,
+  };
+}
+function reset() { planes = [makePlane(0), makePlane(1)]; bullets = []; missiles = []; sparks = []; over = null;
+                   if (typeof cams !== "undefined") for (const c of cams) c.placed = false; }
+reset();
+
+const right = p => v3.norm(v3.cross(p.fwd, p.up));
+const lerp = (a,b,t) => a + (b-a)*t;
+
+function turnFactor(p, rollDir) {
+  // Per-side damage: the wing you are loading is the one that has to work.
+  const wing = rollDir < 0 ? p.wingL : p.wingR;
+  return 0.32 + 0.68 * (wing/100);
+}
+
+function burst(pos, n, colour, spread) {
+  for (let k = 0; k < n; k++)
+    sparks.push({ pos: pos.slice(), vel: [(Math.random()-.5)*spread,(Math.random()-.5)*spread,(Math.random()-.5)*spread],
+                  life: 0.4 + Math.random()*0.7, size: 3 + Math.random()*9, colour });
+}
+
+function damage(p, amount, fromPos) {
+  if (p.dead) return;
+  p.hull = Math.max(0, p.hull - amount);
+  const rel = v3.sub(fromPos, p.pos);
+  if (v3.dot(rel, right(p)) < 0) p.wingL = Math.max(0, p.wingL - amount*0.8);
+  else                           p.wingR = Math.max(0, p.wingR - amount*0.8);
+  p.hitFlash = 1;
+  burst(p.pos, 4, [1.0,0.85,0.55], 90);
+  if (p.hull <= 0) {
+    p.dead = true; p.respawn = 2.8;
+    scores[1-p.i]++;
+    burst(p.pos, 50, [1.0,0.55,0.20], 420);
+    if (scores[1-p.i] >= 5) { over = `${PALETTE[1-p.i].name} WINS`; overAt = performance.now(); }
+  }
+}
+
+function fireCannon(p) {
+  if (p.dead || p.cannonAmmo <= 0 || p.cannonCd > 0) return;
+  p.cannonAmmo--; p.cannonCd = TUNE.cannonCooldown;
+  const r = right(p), u = v3.cross(r, p.fwd);
+  const dir = v3.norm([ p.fwd[0] + (Math.random()-.5)*TUNE.cannonSpread*(r[0]+u[0]),
+                        p.fwd[1] + (Math.random()-.5)*TUNE.cannonSpread*(r[1]+u[1]),
+                        p.fwd[2] + (Math.random()-.5)*TUNE.cannonSpread*(r[2]+u[2]) ]);
+  bullets.push({ owner: p.i, pos: v3.add(p.pos, v3.mul(p.fwd, 16)),
+                 vel: v3.add(v3.mul(dir, TUNE.cannonSpeed), v3.mul(p.fwd, p.speed)),
+                 life: TUNE.cannonLife });
+}
+
+function fireMissile(p, target) {
+  if (p.dead || p.missileAmmo <= 0 || p.missileCd > 0 || !p.locked) return;
+  p.missileAmmo--; p.missileCd = TUNE.missileCooldown; p.lock = 0; p.locked = false;
+  missiles.push({ owner: p.i, pos: p.pos.slice(), fwd: p.fwd.slice(), up: p.up.slice(),
+                  speed: p.speed + 80, life: TUNE.missileLife, target, smoke: [] });
+}
+
+function updateLock(p, other, dt) {
+  if (p.dead || other.dead) { p.lock = 0; p.locked = false; return; }
+  const rel = v3.sub(other.pos, p.pos), dist = v3.len(rel);
+  const good = dist < TUNE.lockRange && v3.dot(v3.norm(rel), p.fwd) > TUNE.lockCone;
+  p.lock = Math.max(0, Math.min(1, p.lock + (good ? dt/TUNE.lockTime : -dt/0.5)));
+  p.locked = p.lock >= 1;
+}
+
+/** Pursuit bot: point at a lead position, roll so its lift vector points there. */
+function botStick(p, other) {
+  if (p.dead || other.dead) return { bank: 0.35, climb: 0.1 };
+
+  // Ground recovery outranks the chase. Rolling wings-level first and only then
+  // pulling is the order that actually works: pulling while inverted is how the
+  // bots were putting themselves into the Thames every twenty seconds.
+  if (p.pos[1] < 480 && p.fwd[1] < 0.35) {
+    const r0 = right(p), u0 = v3.cross(r0, p.fwd);
+    const roll = Math.atan2(v3.dot([0,1,0], r0), v3.dot([0,1,0], u0));
+    return { bank: Math.max(-1, Math.min(1, roll*1.8)), climb: Math.abs(roll) < 0.5 ? 1 : 0.15 };
+  }
+  const rel = v3.sub(other.pos, p.pos), dist = v3.len(rel);
+  const lead = Math.min(1.2, dist/TUNE.cannonSpeed);
+  let want = v3.norm(v3.sub(v3.add(other.pos, v3.mul(other.fwd, other.speed*lead)), p.pos));
+
+  // Ground and boundary avoidance override the chase; a bot that flies into the
+  // Thames every twenty seconds makes the whole thing look broken.
+  if (p.pos[1] < 700) want = v3.norm([want[0], Math.max(0.35, want[1]), want[2]]);
+  if (p.pos[1] > TUNE.ceiling - 400) want = v3.norm([want[0], Math.min(-0.2, want[1]), want[2]]);
+  const flat = Math.hypot(p.pos[0], p.pos[2]);
+  if (flat > CITY) want = v3.norm(v3.add(v3.mul(want, 0.3), v3.norm([-p.pos[0], 0, -p.pos[2]])));
+
+  const r = right(p), u = v3.cross(r, p.fwd);
+  const ahead = v3.dot(want, p.fwd);
+  // Steer on the component of the target direction perpendicular to the nose.
+  // Using the raw direction collapses when the target is dead ahead or dead
+  // astern, and the two bots settle into a co-orbit that never points at
+  // anything -- which is exactly what they did.
+  let perp = v3.sub(want, v3.mul(p.fwd, ahead));
+  perp = v3.len(perp) < 1e-4 ? u : v3.norm(perp);
+  const rollErr = Math.atan2(v3.dot(perp, r), v3.dot(perp, u));   // 0 = lift points at target
+  const bank = Math.max(-1, Math.min(1, rollErr * 1.7));
+  // Only pull once roughly rolled into the turn; pulling while still banked away
+  // from the target is how a turn becomes an escape.
+  const angleOff = Math.acos(Math.max(-1, Math.min(1, ahead)));
+  const pull = Math.min(1, angleOff/0.45) * (Math.abs(rollErr) < 1.0 ? 1 : 0.2);
+  return { bank, climb: pull };
+}
+
+function simulate(dt) {
+  harness();
+
+  for (const p of planes) {
+    const other = planes[1-p.i];
+
+    if (p.dead) {
+      p.respawn -= dt;
+      if (p.respawn <= 0) planes[p.i] = makePlane(p.i);
+      continue;
+    }
+
+    const s = sticks[p.i];
+    const cmd = bots[p.i] ? botStick(p, other) : { bank: s.bank, climb: s.climb };
+
+    // Roll about the nose, pitch about the wing line. Nothing yaws directly:
+    // turning is bank-and-pull, which is what makes tilting a board feel like
+    // flying rather than steering.
+    const rollDir = cmd.bank < 0 ? -1 : 1;
+    const dRoll = cmd.bank * TUNE.rollRate * turnFactor(p, rollDir) * dt;
+    p.up = v3.norm(rotAbout(p.up, p.fwd, dRoll));
+    p.roll += (cmd.bank - p.roll) * (1 - Math.exp(-dt/0.12));
+
+    const r = right(p);
+    const dPitch = cmd.climb * TUNE.pitchRate * dt * lerp(1.15, 0.72, (p.speed-TUNE.speedMin)/(TUNE.speedMax-TUNE.speedMin));
+    p.fwd = v3.norm(rotAbout(p.fwd, r, dPitch));
+    p.up  = v3.norm(rotAbout(p.up,  r, dPitch));
+    // Re-orthogonalise, or float error slowly shears the basis into a mirror.
+    p.up = v3.norm(v3.sub(p.up, v3.mul(p.fwd, v3.dot(p.up, p.fwd))));
+
+    // Speed is energy: point the nose down and you gain it, pull and you bleed it.
+    const grade = -p.fwd[1];
+    const target = TUNE.speedBase + grade*TUNE.gravityBleed*2.4 - Math.abs(cmd.climb)*45;
+    p.speed += (Math.max(TUNE.speedMin, Math.min(TUNE.speedMax, target)) - p.speed) * (1 - Math.exp(-dt/1.4));
+
+    p.pos = v3.add(p.pos, v3.mul(p.fwd, p.speed*dt));
+
+    // The hard deck. Hitting London costs a life, which is the whole reason to
+    // watch the horizon rather than only the other plane.
+    if (p.pos[1] < TUNE.floor) {
+      burst(p.pos, 60, [1.0,0.6,0.25], 500);
+      p.hull = 0; p.dead = true; p.respawn = 2.8; scores[1-p.i]++;
+    }
+    if (p.pos[1] > TUNE.ceiling) { p.pos[1] = TUNE.ceiling; p.fwd = v3.norm([p.fwd[0], Math.min(0, p.fwd[1]), p.fwd[2]]); }
+
+    p.cannonCd = Math.max(0, p.cannonCd - dt);
+    p.missileCd = Math.max(0, p.missileCd - dt);
+    p.hitFlash = Math.max(0, p.hitFlash - dt*3);
+    updateLock(p, other, dt);
+
+    p.trail.push(p.pos.slice());
+    if (p.trail.length > 70) p.trail.shift();
+
+    let fireC, fireM;
+    if (bots[p.i]) {
+      p.botFireCd -= dt;
+      const rel = v3.sub(other.pos, p.pos), dist = v3.len(rel);
+      const aim = v3.dot(v3.norm(rel), p.fwd);
+      fireC = !other.dead && dist < 1500 && aim > 0.970 && p.botFireCd <= 0;
+      if (fireC) { p.botFireCd = 0.10 + Math.random()*0.08; if (Math.random() < 0.15) fireC = false; }
+      fireM = p.locked && dist > 220 && Math.random() < dt*0.8;
+    } else {
+      fireC = s.takeEdge(0);
+      fireM = s.takeEdge(1);
+    }
+    if (fireC) fireCannon(p);
+    if (fireM) fireMissile(p, other.i);
+  }
+
+  for (const b of bullets) {
+    const prev = b.pos.slice();
+    b.pos = v3.add(b.pos, v3.mul(b.vel, dt));
+    b.life -= dt;
+    const t = planes[1-b.owner];
+    if (t.dead) continue;
+    // Swept test: at 2400 units/s a frame step is longer than the aircraft.
+    const seg = v3.sub(b.pos, prev), len2 = v3.dot(seg,seg) || 1;
+    let u = v3.dot(v3.sub(t.pos, prev), seg)/len2;
+    u = Math.max(0, Math.min(1, u));
+    const closest = v3.add(prev, v3.mul(seg, u));
+    if (v3.len(v3.sub(t.pos, closest)) < 32) { damage(t, TUNE.cannonDamage, b.pos); b.life = 0; }
+    if (b.pos[1] < 0) b.life = 0;
+  }
+  bullets = bullets.filter(b => b.life > 0);
+
+  for (const m of missiles) {
+    const t = planes[m.target];
+    m.life -= dt;
+    if (!t.dead) {
+      const want = v3.norm(v3.sub(t.pos, m.pos));
+      const axis = v3.cross(m.fwd, want), s = v3.len(axis);
+      if (s > 1e-5) {
+        const angle = Math.min(TUNE.missileTurn*dt, Math.asin(Math.min(1, s)));
+        m.fwd = v3.norm(rotAbout(m.fwd, v3.mul(axis, 1/s), angle));
+      }
+    }
+    m.speed = Math.min(1400, m.speed + TUNE.missileAccel*dt);
+    m.pos = v3.add(m.pos, v3.mul(m.fwd, m.speed*dt));
+    m.smoke.push(m.pos.slice());
+    if (m.smoke.length > 50) m.smoke.shift();
+    if (!t.dead && v3.len(v3.sub(t.pos, m.pos)) < 62) {
+      damage(t, TUNE.missileDamage, m.pos);
+      burst(m.pos, 22, [1.0,0.75,0.35], 260);
+      m.life = 0;
+    }
+    if (m.pos[1] < 0) { burst(m.pos, 14, [0.8,0.8,0.8], 180); m.life = 0; }
+  }
+  missiles = missiles.filter(m => m.life > 0);
+
+  for (const s of sparks) { s.pos = v3.add(s.pos, v3.mul(s.vel, dt)); s.vel = v3.mul(s.vel, 0.93); s.life -= dt; }
+  sparks = sparks.filter(s => s.life > 0);
+
+  if (over && performance.now() - overAt > 3500) { scores = [0,0]; reset(); }
+}
+
+/* ===========================================================================
+   PART 6 — RENDER
+   Two viewports on one canvas via gl.viewport + gl.scissor, with a 2D overlay
+   canvas on top carrying each half's HUD.
+   =========================================================================== */
+
+const hudcv = document.getElementById("hud");
+const hx = hudcv.getContext("2d");
+let DPR = 1;
+function resize() {
+  DPR = Math.min(2, devicePixelRatio || 1);
+  for (const c of [glcv, hudcv]) { c.width = Math.floor(innerWidth*DPR); c.height = Math.floor(innerHeight*DPR); }
+}
+addEventListener("resize", resize); resize();
+
+const proj = mat4(), view = mat4(), model = mat4();
+const cams = [ { eye: [0,0,0], at: [0,0,0], up: [0,1,0], placed: false },
+               { eye: [0,0,0], at: [0,0,0], up: [0,1,0], placed: false } ];
+
+function updateCamera(i, dt) {
+  const p = planes[i], c = cams[i];
+  const u = v3.cross(right(p), p.fwd);
+  // Chase cam sits behind and above along the aircraft's own axes, so a roll
+  // rolls the world, which is the whole read on what the stick is doing.
+  const wantEye = v3.add(v3.add(p.pos, v3.mul(p.fwd, -215)), v3.mul(u, 52));
+  // Snap on the first frame. Lerping in from the world origin left the player's
+  // own aircraft off-camera for the first second or two of every run.
+  const k = c.placed ? 1 - Math.exp(-dt/0.045) : 1;
+  c.placed = true;
+  c.eye = [ lerp(c.eye[0], wantEye[0], k), lerp(c.eye[1], wantEye[1], k), lerp(c.eye[2], wantEye[2], k) ];
+  c.at = v3.add(p.pos, v3.mul(p.fwd, 260));
+  c.up = [ lerp(c.up[0], u[0], k), lerp(c.up[1], u[1], k), lerp(c.up[2], u[2], k) ];
+  if (c.eye[1] < 25) c.eye[1] = 25;             // never let the camera go underground
+}
+
+function renderHalf(i, x, y, w, h) {
+  gl.viewport(x, y, w, h);
+  gl.scissor(x, y, w, h);
+  gl.clearColor(SKY_HAZE[0], SKY_HAZE[1], SKY_HAZE[2], 1);
+  gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+
+  perspective(proj, 1.15, w/h, 8, 30000);
+  const c = cams[i];
+  lookAt(view, c.eye, c.at, c.up);
+  gl.uniformMatrix4fv(U.proj, false, proj);
+  gl.uniformMatrix4fv(U.view, false, view);
+  gl.uniform3fv(U.fog, SKY_HAZE);
+
+  // Sky first, unlit, with depth writes off and culling parked so the inside of
+  // the dome is what gets drawn.
+  gl.depthMask(false);
+  gl.uniform1f(U.unlit, 1);
+  basisModel(model, [14000,0,0], [0,14000,0], [0,0,14000], c.eye);
+  drawMesh(skyMesh, model, [1,1,1]);
+  gl.uniform1f(U.unlit, 0);
+  gl.depthMask(true);
+
+  basisModel(model, [1,0,0], [0,1,0], [0,0,1], [0,0,0]);
+  drawMesh(cityMesh, model, [1,1,1]);
+
+  for (const p of planes) {
+    if (p.dead) continue;
+    const r = right(p), u = v3.cross(r, p.fwd);
+    // Columns are the local x/y/z axes: nose, up, right wing.
+    basisModel(model, p.fwd, u, r, p.pos, 1.6);
+    const tint = p.hitFlash > 0 ? [1.6,1.3,0.9]
+               : [ PALETTE[p.i].key[0]*0.55 + 0.5, PALETTE[p.i].key[1]*0.55 + 0.5, PALETTE[p.i].key[2]*0.55 + 0.5 ];
+    drawMesh(planeMesh, model, tint);
+  }
+
+  for (const m of missiles) {
+    const r = v3.norm(v3.cross(m.fwd, [0,1,0]));
+    const u = v3.cross(r, m.fwd);
+    basisModel(model, m.fwd, u, r, m.pos, 1);
+    drawMesh(missileMesh, model, [1,1,1]);
+  }
+
+  // Tracers and smoke as stretched cubes: no second shader, no blending state,
+  // and at these speeds a lit box reads exactly like a tracer.
+  for (const b of bullets) {
+    const back = v3.mul(v3.norm(b.vel), -1);
+    const r = v3.norm(v3.cross(back, [0,1,0])), u = v3.cross(r, back);
+    basisModel(model, v3.mul(back, 26), v3.mul(r, 1.1), v3.mul(u, 1.1), b.pos);
+    drawMesh(cubeMesh, model, [2.4, 2.0, 1.1]);
+  }
+  for (const m of missiles) {
+    for (let k = 0; k < m.smoke.length; k += 2) {
+      const t = k/m.smoke.length, s = 3 + 9*t;
+      basisModel(model, [s,0,0], [0,s,0], [0,0,s], m.smoke[k]);
+      drawMesh(cubeMesh, model, [1.1,1.1,1.15]);
+    }
+  }
+  for (const p of planes) {
+    for (let k = 0; k < p.trail.length; k += 2) {
+      const t = k/p.trail.length, s = 1.5 + 5*t;
+      basisModel(model, [s,0,0], [0,s,0], [0,0,s], p.trail[k]);
+      drawMesh(cubeMesh, model, [1.15,1.18,1.22]);
+    }
+  }
+  for (const s of sparks) {
+    const sz = s.size*(0.4 + s.life);
+    basisModel(model, [sz,0,0], [0,sz,0], [0,0,sz], s.pos);
+    drawMesh(cubeMesh, model, s.colour.map(v => v*2));
+  }
+}
+
+/** Project a world point into a viewport's pixel space, or null if behind. */
+function project(worldPos, i, vx, vy, vw, vh) {
+  const c = cams[i];
+  perspective(proj, 1.15, vw/vh, 8, 30000);
+  lookAt(view, c.eye, c.at, c.up);
+  const vp = mul(mat4(), proj, view);
+  const p = worldPos;
+  const clip = [ vp[0]*p[0]+vp[4]*p[1]+vp[8]*p[2]+vp[12],
+                 vp[1]*p[0]+vp[5]*p[1]+vp[9]*p[2]+vp[13],
+                 vp[2]*p[0]+vp[6]*p[1]+vp[10]*p[2]+vp[14],
+                 vp[3]*p[0]+vp[7]*p[1]+vp[11]*p[2]+vp[15] ];
+  if (clip[3] <= 0.001) return null;
+  return [ vx + (clip[0]/clip[3]*0.5 + 0.5)*vw, vy + (0.5 - clip[1]/clip[3]*0.5)*vh, clip[3] ];
+}
+
+function hudBar(x, y, w, h, v, colour) {
+  hx.fillStyle = "rgba(255,255,255,.16)"; hx.fillRect(x,y,w,h);
+  hx.fillStyle = colour; hx.fillRect(x,y,w*Math.max(0,Math.min(1,v)),h);
+}
+
+function drawHalfHud(i, vx, vy, vw, vh) {
+  const p = planes[i], other = planes[1-i], pal = PALETTE[i];
+  hx.save();
+  hx.beginPath(); hx.rect(vx, vy, vw, vh); hx.clip();
+
+  // Gunsight.
+  const cx = vx + vw/2, cy = vy + vh/2;
+  hx.strokeStyle = "rgba(255,255,255,.55)"; hx.lineWidth = 1.5;
+  hx.beginPath(); hx.arc(cx, cy, 13, 0, 7); hx.stroke();
+  for (const a of [0, Math.PI/2, Math.PI, -Math.PI/2]) {
+    hx.beginPath();
+    hx.moveTo(cx+Math.cos(a)*20, cy+Math.sin(a)*20);
+    hx.lineTo(cx+Math.cos(a)*30, cy+Math.sin(a)*30);
+    hx.stroke();
+  }
+
+  // Target box, or an arrow at the edge pointing at where the target actually is.
+  if (!other.dead && !p.dead) {
+    const pr = project(other.pos, i, vx, vy, vw, vh);
+    const dist = v3.len(v3.sub(other.pos, p.pos));
+    const onScreen = pr && pr[0] > vx+10 && pr[0] < vx+vw-10 && pr[1] > vy+10 && pr[1] < vy+vh-10;
+    if (onScreen) {
+      const s = Math.max(14, 2600/Math.max(120, dist));
+      hx.strokeStyle = p.locked ? PALETTE[1-i].css : "rgba(255,255,255,.75)";
+      hx.lineWidth = p.locked ? 2.4 : 1.4;
+      hx.setLineDash(p.lock > 0 && !p.locked ? [4,4] : []);
+      hx.strokeRect(pr[0]-s, pr[1]-s, s*2, s*2);
+      hx.setLineDash([]);
+      hx.fillStyle = "rgba(255,255,255,.8)"; hx.font = "600 11px ui-monospace, monospace";
+      hx.fillText(`${Math.round(dist)}`, pr[0]+s+5, pr[1]-s+9);
+      if (p.lock > 0 && !p.locked) hudBar(pr[0]-s, pr[1]+s+5, s*2, 3, p.lock, "#F5A623");
+    } else {
+      const rel = v3.sub(other.pos, p.pos);
+      const r = right(p), u = v3.cross(r, p.fwd);
+      const a = Math.atan2(v3.dot(rel, r), v3.dot(rel, u));
+      const rad = Math.min(vw, vh) * 0.36;
+      const ax = cx + Math.sin(a)*rad, ay = cy - Math.cos(a)*rad;
+      hx.save(); hx.translate(ax, ay); hx.rotate(a);
+      hx.fillStyle = PALETTE[1-i].css;
+      hx.beginPath(); hx.moveTo(0,-11); hx.lineTo(8,7); hx.lineTo(-8,7); hx.closePath(); hx.fill();
+      hx.restore();
+    }
+  }
+
+  // Horizon reference: a roll ladder pinned to the world's up, so the player can
+  // tell level from inverted without a visible skyline.
+  const u = v3.cross(right(p), p.fwd);
+  const rollAngle = Math.atan2(v3.dot([0,1,0], right(p)), v3.dot([0,1,0], u));
+  hx.save(); hx.translate(cx, cy); hx.rotate(rollAngle);
+  hx.strokeStyle = "rgba(255,255,255,.30)"; hx.lineWidth = 1.5;
+  for (const s of [-1, 1]) {
+    hx.beginPath(); hx.moveTo(s*46, 0); hx.lineTo(s*104, 0); hx.stroke();
+    hx.beginPath(); hx.moveTo(s*104, 0); hx.lineTo(s*104, 8); hx.stroke();
+  }
+  hx.restore();
+
+  // Bottom strip: the same numbers the board's own panel shows (hud.h).
+  const bx = vx + 18, by = vy + vh - 92;
+  hx.fillStyle = "rgba(5,10,18,.62)"; hx.fillRect(bx-10, by-24, 262, 100);
+  hx.fillStyle = pal.css; hx.font = "700 13px ui-monospace, monospace";
+  hx.fillText(pal.name, bx, by-6);
+  hx.fillStyle = "#8ea3bb"; hx.font = "600 11px ui-monospace, monospace";
+  hx.fillText(`${Math.round(p.speed)} KTS   ALT ${Math.round(p.pos[1])}`, bx+70, by-6);
+
+  hx.fillStyle = "#dfe7f2"; hx.font = "700 26px ui-monospace, monospace";
+  hx.fillText(`${Math.round(p.hull)}%`, bx, by+22);
+  hudBar(bx+70, by+9, 172, 12, p.hull/100, p.hull > 60 ? "#7dffb0" : p.hull > 30 ? "#F5A623" : "#FF4D4D");
+
+  hx.fillStyle = "#6A7686"; hx.font = "600 9px ui-monospace, monospace";
+  hx.fillText("WING L", bx, by+38); hx.fillText("WING R", bx+130, by+38);
+  hudBar(bx, by+42, 116, 6, p.wingL/100, p.wingL > 50 ? "#7fd4ff" : "#FF4D4D");
+  hudBar(bx+130, by+42, 116, 6, p.wingR/100, p.wingR > 50 ? "#7fd4ff" : "#FF4D4D");
+
+  hx.fillStyle = p.cannonAmmo ? "#dfe7f2" : "#FF4D4D"; hx.font = "700 14px ui-monospace, monospace";
+  hx.fillText(`CANNON ${p.cannonAmmo}`, bx, by+66);
+  hx.fillStyle = p.locked ? pal.css : (p.missileAmmo ? "#dfe7f2" : "#FF4D4D");
+  hx.fillText(`MSL ${p.missileAmmo}${p.locked ? "  LOCK" : ""}`, bx+130, by+66);
+
+  // Low-altitude warning: the ground is a real threat here, so it needs a voice.
+  if (!p.dead && p.pos[1] < 420) {
+    hx.fillStyle = (performance.now()/160|0) % 2 ? "#FF4D4D" : "rgba(255,77,77,.35)";
+    hx.font = "700 22px ui-monospace, monospace"; hx.textAlign = "center";
+    hx.fillText("PULL UP", cx, vy + vh*0.30);
+    hx.textAlign = "left";
+  }
+  if (p.dead) {
+    hx.fillStyle = "rgba(5,10,18,.55)"; hx.fillRect(vx, vy, vw, vh);
+    hx.fillStyle = "#dfe7f2"; hx.font = "700 20px ui-monospace, monospace"; hx.textAlign = "center";
+    hx.fillText("SHOT DOWN", cx, cy - 10);
+    hx.font = "600 13px ui-monospace, monospace"; hx.fillStyle = "#8ea3bb";
+    hx.fillText(`respawn ${p.respawn.toFixed(1)}s`, cx, cy + 14);
+    hx.textAlign = "left";
+  }
+  hx.restore();
+}
+
+function drawOverlay() {
+  const W = hudcv.width/DPR, H = hudcv.height/DPR;
+  hx.setTransform(DPR,0,0,DPR,0,0);
+  hx.clearRect(0,0,W,H);
+
+  const half = W/2;
+  drawHalfHud(0, 0, 0, half, H);
+  drawHalfHud(1, half, 0, half, H);
+
+  // Split gutter.
+  hx.fillStyle = "#05070a"; hx.fillRect(half-2, 0, 4, H);
+
+  // Score, straddling the split.
+  hx.save();
+  hx.font = "700 24px ui-monospace, monospace"; hx.textAlign = "center";
+  hx.fillStyle = "rgba(5,10,18,.72)"; hx.fillRect(half-64, H-52, 128, 40);
+  hx.fillStyle = PALETTE[0].css; hx.fillText(String(scores[0]), half-30, H-24);
+  hx.fillStyle = "#57657a"; hx.fillText("–", half, H-24);
+  hx.fillStyle = PALETTE[1].css; hx.fillText(String(scores[1]), half+30, H-24);
+  hx.restore();
+
+  const label = over ? over : paused ? "PAUSED" : null;
+  if (label) {
+    hx.save(); hx.textAlign = "center"; hx.font = "700 34px ui-monospace, monospace";
+    hx.fillStyle = "rgba(5,10,18,.8)"; hx.fillRect(half-230, H/2-38, 460, 66);
+    hx.fillStyle = "#dfe7f2"; hx.fillText(label, half, H/2+8);
+    hx.restore();
+  }
+}
+
+/* ---- loop ----------------------------------------------------------------- */
+
+gl.enable(gl.DEPTH_TEST);
+gl.enable(gl.SCISSOR_TEST);
+
+let last = performance.now();
+function frame(now) {
+  const dt = Math.min(0.05, (now-last)/1000); last = now;
+  if (!paused) { simulate(dt); updateCamera(0, dt); updateCamera(1, dt); }
+
+  const w = glcv.width, h = glcv.height;
+  renderHalf(0, 0, 0, Math.floor(w/2), h);
+  renderHalf(1, Math.floor(w/2), 0, w - Math.floor(w/2), h);
+  drawOverlay();
+
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+</script>
