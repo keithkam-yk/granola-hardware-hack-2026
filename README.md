@@ -93,3 +93,15 @@ Run without automatically opening a browser or use a different device:
 ```bash
 python3 dashboard.py --no-open --device /dev/cu.usbmodem1101
 ```
+
+## The pigeon
+
+Fly a pigeon over photorealistic London, with the board as the controller.
+
+```bash
+python3 pigeon/server.py            # then open the address it prints
+```
+
+Playable on keyboard and mouse with no hardware; a board takes over the moment
+it appears. `docs/pigeon.md` covers the firmware split, the wire format, and
+the one thing currently blocked.
