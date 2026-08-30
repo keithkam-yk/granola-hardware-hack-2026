@@ -1,7 +1,11 @@
+import http.client
 import json
+import threading
 import unittest
+from pathlib import Path
 
-from dashboard import EventBroker, ImuSample, parse_device_event
+from dashboard import DashboardServer, EventBroker, ImuSample, parse_device_event
+from doodle_demo.predictor import Prediction
 
 
 class ImuSampleTests(unittest.TestCase):
@@ -69,6 +73,65 @@ class DeviceEventTests(unittest.TestCase):
         self.assertIsNone(parse_device_event(b'{"seq":1}'))
         self.assertIsNone(parse_device_event(b"I (42) boot"))
         self.assertIsNone(parse_device_event(b"{"))
+
+
+class FakeReader:
+    def send_command(self, _command: str) -> bool:
+        return True
+
+
+class FakeDoodlePredictor:
+    model_id = "fake/quickdraw"
+
+    def predict(self, image_bytes: bytes, *, top_k: int = 5) -> tuple[Prediction, ...]:
+        if not image_bytes:
+            raise AssertionError("image should not be empty")
+        return (Prediction("cat", 0.82, "🐱"),)[:top_k]
+
+
+class DashboardServerTests(unittest.TestCase):
+    def setUp(self) -> None:
+        index_path = Path(__file__).parents[1] / "web" / "index.html"
+        self.server = DashboardServer(
+            ("127.0.0.1", 0),
+            index_path,
+            EventBroker(),
+            FakeReader(),  # type: ignore[arg-type]
+            FakeDoodlePredictor(),  # type: ignore[arg-type]
+        )
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+        self.connection = http.client.HTTPConnection(
+            "127.0.0.1", self.server.server_address[1], timeout=2
+        )
+
+    def tearDown(self) -> None:
+        self.connection.close()
+        self.server.shutdown()
+        self.server.server_close()
+        self.thread.join(timeout=2)
+
+    def test_serves_motion_doodle_page(self) -> None:
+        self.connection.request("GET", "/doodle")
+        response = self.connection.getresponse()
+        body = response.read()
+        self.assertEqual(response.status, 200)
+        self.assertIn(b"Air Doodle", body)
+        self.assertIn(b"EventSource('/events')", body)
+
+    def test_predicts_doodle_on_dashboard_origin(self) -> None:
+        image_bytes = b"fake png bytes"
+        self.connection.request(
+            "POST",
+            "/api/doodle/predict?top_k=1",
+            body=image_bytes,
+            headers={"Content-Type": "image/png", "Content-Length": len(image_bytes)},
+        )
+        response = self.connection.getresponse()
+        payload = json.loads(response.read())
+        self.assertEqual(response.status, 200)
+        self.assertEqual(payload["model"], "fake/quickdraw")
+        self.assertEqual(payload["predictions"][0]["label"], "cat")
 
 
 if __name__ == "__main__":

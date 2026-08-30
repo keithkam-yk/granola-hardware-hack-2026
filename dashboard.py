@@ -19,11 +19,22 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qs, urlparse
+
+from doodle_demo.predictor import (
+    DEFAULT_MODEL_ID,
+    InvalidImage,
+    LiteRTQuickDrawPredictor,
+    ModelUnavailable,
+    PredictionError,
+)
 
 
 SAMPLE_FIELDS = ("seq", "t", "ax", "ay", "az", "gx", "gy", "gz", "temp")
 SENSITIVITY_MIN = 0.05
 SENSITIVITY_MAX = 0.80
+MAX_DOODLE_IMAGE_BYTES = 2 * 1024 * 1024
+DOODLE_IMAGE_TYPES = {"image/png", "image/jpeg"}
 
 
 @dataclass(frozen=True)
@@ -222,13 +233,17 @@ class DashboardServer(ThreadingHTTPServer):
     daemon_threads = True
 
     def __init__(self, address: tuple[str, int], index_path: Path,
-                 broker: EventBroker, reader: SerialReader) -> None:
+                 broker: EventBroker, reader: SerialReader,
+                 doodle_predictor: LiteRTQuickDrawPredictor) -> None:
         super().__init__(address, DashboardHandler)
         self.index_html = index_path.read_bytes()
         self.flight_html = index_path.with_name("flight.html").read_bytes()
         self.cat_html = index_path.with_name("cat.html").read_bytes()
+        self.hockey_html = index_path.with_name("hockey.html").read_bytes()
+        self.doodle_html = index_path.with_name("doodle.html").read_bytes()
         self.broker = broker
         self.reader = reader
+        self.doodle_predictor = doodle_predictor
 
 
 class DashboardHandler(BaseHTTPRequestHandler):
@@ -239,22 +254,31 @@ class DashboardHandler(BaseHTTPRequestHandler):
         return self.server  # type: ignore[return-value]
 
     def do_GET(self) -> None:
-        if self.path == "/":
+        route = urlparse(self.path).path
+        if route == "/":
             self._send_bytes("text/html; charset=utf-8", self.dashboard.index_html)
-        elif self.path in {"/flight", "/flight/", "/flight.html"}:
+        elif route in {"/flight", "/flight/", "/flight.html"}:
             self._send_bytes("text/html; charset=utf-8", self.dashboard.flight_html)
-        elif self.path in {"/cat", "/cat/", "/cat.html"}:
+        elif route in {"/cat", "/cat/", "/cat.html"}:
             self._send_bytes("text/html; charset=utf-8", self.dashboard.cat_html)
-        elif self.path == "/events":
+        elif route in {"/hockey", "/hockey/", "/hockey.html"}:
+            self._send_bytes("text/html; charset=utf-8", self.dashboard.hockey_html)
+        elif route in {"/doodle", "/doodle/", "/doodle.html"}:
+            self._send_bytes("text/html; charset=utf-8", self.dashboard.doodle_html)
+        elif route == "/events":
             self._stream_events()
-        elif self.path == "/health":
+        elif route == "/health":
             payload = json.dumps(self.dashboard.broker.snapshot()).encode()
             self._send_bytes("application/json", payload)
         else:
             self.send_error(HTTPStatus.NOT_FOUND)
 
     def do_POST(self) -> None:
-        if self.path != "/settings":
+        route = urlparse(self.path).path
+        if route == "/api/doodle/predict":
+            self._predict_doodle()
+            return
+        if route != "/settings":
             self.send_error(HTTPStatus.NOT_FOUND)
             return
         try:
@@ -271,8 +295,69 @@ class DashboardHandler(BaseHTTPRequestHandler):
             return
         self._send_bytes("application/json", b'{"ok":true}')
 
-    def _send_bytes(self, content_type: str, payload: bytes) -> None:
-        self.send_response(HTTPStatus.OK)
+    def _predict_doodle(self) -> None:
+        content_type = self.headers.get_content_type()
+        if content_type not in DOODLE_IMAGE_TYPES:
+            self.close_connection = True
+            self._send_json_error(
+                HTTPStatus.UNSUPPORTED_MEDIA_TYPE,
+                "Send a PNG or JPEG image",
+            )
+            return
+        try:
+            content_length = int(self.headers.get("Content-Length", "0"))
+            top_k = int(parse_qs(urlparse(self.path).query).get("top_k", ["5"])[0])
+            if not 1 <= top_k <= 10:
+                raise ValueError
+        except ValueError:
+            self.close_connection = True
+            self._send_json_error(HTTPStatus.BAD_REQUEST, "Invalid request")
+            return
+        if not 0 < content_length <= MAX_DOODLE_IMAGE_BYTES:
+            self.close_connection = True
+            self._send_json_error(
+                HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
+                "Image must be between 1 byte and 2 MiB",
+            )
+            return
+
+        image_bytes = self.rfile.read(content_length)
+        try:
+            predictions = self.dashboard.doodle_predictor.predict(image_bytes, top_k=top_k)
+        except InvalidImage as error:
+            self._send_json_error(HTTPStatus.BAD_REQUEST, str(error))
+            return
+        except ModelUnavailable as error:
+            self._send_json_error(HTTPStatus.SERVICE_UNAVAILABLE, str(error))
+            return
+        except PredictionError as error:
+            self._send_json_error(HTTPStatus.INTERNAL_SERVER_ERROR, str(error))
+            return
+        except Exception as error:
+            print(f"Unexpected doodle prediction error: {error}")
+            self._send_json_error(
+                HTTPStatus.INTERNAL_SERVER_ERROR,
+                "Prediction failed unexpectedly",
+            )
+            return
+        payload = json.dumps(
+            {
+                "model": self.dashboard.doodle_predictor.model_id,
+                "predictions": [prediction.as_dict() for prediction in predictions],
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode()
+        self._send_bytes("application/json; charset=utf-8", payload)
+
+    def _send_json_error(self, status: HTTPStatus, message: str) -> None:
+        payload = json.dumps({"error": {"message": message}}).encode()
+        self._send_bytes("application/json; charset=utf-8", payload, status=status)
+
+    def _send_bytes(
+        self, content_type: str, payload: bytes, *, status: HTTPStatus = HTTPStatus.OK
+    ) -> None:
+        self.send_response(status)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(payload)))
         self.send_header("Cache-Control", "no-store")
@@ -329,7 +414,8 @@ def main() -> None:
     broker = EventBroker()
     index_path = Path(__file__).with_name("web") / "index.html"
     reader = SerialReader(device, broker, stop_event)
-    server = DashboardServer((args.host, args.port), index_path, broker, reader)
+    predictor = LiteRTQuickDrawPredictor(DEFAULT_MODEL_ID)
+    server = DashboardServer((args.host, args.port), index_path, broker, reader, predictor)
     reader.start()
 
     def stop(_signum: int, _frame: Any) -> None:

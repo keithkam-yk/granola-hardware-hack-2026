@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Magnetic Air Hockey</title>
+  <style>
+    :root{color-scheme:dark;--bg:#0c0f17;--panel:#121827;--line:#31415c;--text:#edf7ff;--muted:#8292a9;--cyan:#54e6e6;--pink:#ff628f;--gold:#ffd166}
+    *{box-sizing:border-box} body{margin:0;min-height:100vh;background:var(--bg);color:var(--text);font-family:ui-monospace,SFMono-Regular,Menlo,monospace;overflow:hidden}
+    main{height:100vh;display:grid;grid-template-rows:auto minmax(0,1fr) auto;gap:12px;padding:18px}
+    header,footer{width:min(980px,100%);margin:auto;display:flex;align-items:center;justify-content:space-between;gap:16px}
+    .eyebrow{font-size:10px;letter-spacing:.18em;color:var(--cyan);margin-bottom:5px}.title{font-size:clamp(18px,2.4vw,30px);font-weight:800;letter-spacing:-.05em}
+    .status{display:flex;gap:8px}.chip{padding:7px 10px;border:1px solid var(--line);color:var(--muted);font-size:10px;letter-spacing:.08em;text-transform:uppercase}.chip.live{color:var(--cyan);border-color:#378f9a}.chip.power{color:#ffd9e4;border-color:var(--pink);background:#351729}
+    .stage{min-width:0;min-height:0;display:grid;place-items:center}.table-wrap{width:min(980px,100%);max-height:100%;aspect-ratio:720/460;position:relative;border:2px solid #273650;background:var(--panel);box-shadow:0 18px 70px #03050a}
+    canvas{display:block;width:100%;height:100%;touch-action:none;cursor:crosshair}.score{position:absolute;top:13px;left:50%;transform:translateX(-50%);display:flex;gap:12px;align-items:center;padding:7px 12px;background:#0b101bcc;border:1px solid #33445f;font-size:13px;pointer-events:none}.score b:first-child{color:var(--pink)}.score b:last-child{color:var(--cyan)}
+    .hint{position:absolute;left:14px;bottom:14px;padding:8px 10px;background:#0b101bd9;border:1px solid #33445f;color:var(--muted);font-size:10px;line-height:1.5;pointer-events:none}.hint strong{color:var(--text)}
+    footer{font-size:10px;color:var(--muted)}footer a{color:#afc5de;text-decoration:none;border-bottom:1px solid #40516a}footer span:last-child{text-align:right}
+    @media(max-width:680px){main{padding:10px}.status{display:none}.hint{font-size:9px}footer span:last-child{display:none}}
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <div><div class="eyebrow">QMI8658 CONTROL STUDY</div><div class="title">Magnetic Air Hockey</div></div>
+      <div class="status"><span class="chip" id="usb">USB waiting</span><span class="chip" id="gyro">gyro waiting</span><span class="chip" id="control">controls idle</span></div>
+    </header>
+    <section class="stage">
+      <div class="table-wrap">
+        <canvas id="game" width="720" height="460" aria-label="Single-player air hockey controlled by the ESP32 motion controller"></canvas>
+        <div class="score"><b id="cpuScore">0</b><span>—</span><b id="playerScore">0</b></div>
+        <div class="hint"><strong id="headline">HOLD MOVE + TILT</strong><br><span id="detail">LASER adds magnetic pull</span></div>
+      </div>
+    </section>
+    <footer><span><a href="/">sensor lab</a> · <a href="/cat">cat demo</a> · <a href="/flight">flight demo</a></span><span>first to 5 · you defend the cyan goal</span></footer>
+  </main>
+  <script>
+    const canvas=document.querySelector('#game'),ctx=canvas.getContext('2d'),W=canvas.width,H=canvas.height;
+    const puck={x:W/2,y:H/2,vx:95,vy:135,r:12},player={x:W/2,y:H-78,px:W/2,py:H-78,vx:0,vy:0,r:27},cpu={x:W/2,y:78,px:W/2,py:78,vx:0,vy:0,r:27};
+    let connected=false,calibrated=false,clutch='idle',mode='none',playerScore=0,cpuScore=0,last=performance.now(),serveTimer=.7,flash=0,mouseControl=false,cpuIntent='tracking';
+    const clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
+    function circle(x,y,r,color){ctx.fillStyle=color;ctx.beginPath();ctx.arc(x,y,r,0,Math.PI*2);ctx.fill()}
+    function line(x1,y1,x2,y2,color,width=2){ctx.strokeStyle=color;ctx.lineWidth=width;ctx.beginPath();ctx.moveTo(x1,y1);ctx.lineTo(x2,y2);ctx.stroke()}
+    function resetPuck(towardPlayer){puck.x=W/2;puck.y=H/2;puck.vx=(Math.random()-.5)*150;puck.vy=(towardPlayer?1:-1)*(120+Math.random()*50);serveTimer=.75}
+    function score(who){if(who==='player')playerScore++;else cpuScore++;flash=.24;document.querySelector('#playerScore').textContent=playerScore;document.querySelector('#cpuScore').textContent=cpuScore;if(playerScore>=5||cpuScore>=5){playerScore=cpuScore=0;document.querySelector('#playerScore').textContent='0';document.querySelector('#cpuScore').textContent='0'}resetPuck(who==='cpu')}
+    function collide(p){const dx=puck.x-p.x,dy=puck.y-p.y,d=Math.hypot(dx,dy),min=puck.r+p.r;if(d>0&&d<min){const nx=dx/d,ny=dy/d,overlap=min-d;puck.x+=nx*overlap;puck.y+=ny*overlap;const relative=(puck.vx-p.vx)*nx+(puck.vy-p.vy)*ny;if(relative<0){const impulse=-1.8*relative;puck.vx+=nx*impulse+p.vx*.32;puck.vy+=ny*impulse+p.vy*.32}puck.vx+=nx*42;puck.vy+=ny*42;flash=.06}}
+    function movePaddle(p,x,y,dt){p.px=p.x;p.py=p.y;p.x=clamp(x,p.r+22,W-p.r-22);p.y=clamp(y,p===player?H/2+p.r+5:p.r+22,p===player?H-p.r-22:H/2-p.r-5);p.vx=(p.x-p.px)/Math.max(dt,.001);p.vy=(p.y-p.py)/Math.max(dt,.001)}
+    function update(dt){
+      const puckSpeed=Math.hypot(puck.vx,puck.vy),stalled=serveTimer<=0&&puckSpeed<55;
+      const cpuTargetX=serveTimer>0?W/2:stalled?puck.x:clamp(puck.x+puck.vx*.15,90,W-90);
+      const cpuTargetY=serveTimer>0?78:stalled?puck.y-(puck.r+cpu.r-3):clamp(puck.y-65,68,H/2-45);
+      const cpuStep=clamp((stalled?7:2.4)*dt,0,1);cpuIntent=stalled?'chasing':'tracking';
+      movePaddle(cpu,cpu.x+(cpuTargetX-cpu.x)*cpuStep,cpu.y+(cpuTargetY-cpu.y)*cpuStep,dt);
+      if(serveTimer>0){serveTimer-=dt;return}
+      if(clutch==='active'&&mode==='laser'){const dx=player.x-puck.x,dy=player.y-puck.y,d=Math.hypot(dx,dy);if(d<190&&d>2){const pull=(1-d/190)*620;puck.vx+=dx/d*pull*dt;puck.vy+=dy/d*pull*dt}}
+      puck.x+=puck.vx*dt;puck.y+=puck.vy*dt;puck.vx*=Math.pow(.995,dt*60);puck.vy*=Math.pow(.995,dt*60);
+      const goalLeft=W/2-76,goalRight=W/2+76;
+      if(puck.x-puck.r<20){puck.x=20+puck.r;puck.vx=Math.abs(puck.vx)}if(puck.x+puck.r>W-20){puck.x=W-20-puck.r;puck.vx=-Math.abs(puck.vx)}
+      if(puck.y-puck.r<20){if(puck.x>goalLeft&&puck.x<goalRight&&puck.y<-puck.r)score('player');else if(!(puck.x>goalLeft&&puck.x<goalRight)){puck.y=20+puck.r;puck.vy=Math.abs(puck.vy)}}
+      if(puck.y+puck.r>H-20){if(puck.x>goalLeft&&puck.x<goalRight&&puck.y>H+puck.r)score('cpu');else if(!(puck.x>goalLeft&&puck.x<goalRight)){puck.y=H-20-puck.r;puck.vy=-Math.abs(puck.vy)}}
+      collide(player);collide(cpu);const speedLimit=650,s=Math.hypot(puck.vx,puck.vy);if(s>speedLimit){puck.vx=puck.vx/s*speedLimit;puck.vy=puck.vy/s*speedLimit}
+    }
+    function draw(){
+      ctx.fillStyle=flash>0?'#17243a':'#101725';ctx.fillRect(0,0,W,H);
+      ctx.strokeStyle='#253b55';ctx.lineWidth=2;for(let x=40;x<W;x+=40)line(x,20,x,H-20,'#18283b',1);for(let y=20;y<H;y+=40)line(20,y,W-20,y,'#18283b',1);
+      ctx.strokeStyle='#42627d';ctx.lineWidth=3;ctx.strokeRect(20,20,W-40,H-40);line(20,H/2,W-20,H/2,'#45617b',2);ctx.beginPath();ctx.arc(W/2,H/2,66,0,Math.PI*2);ctx.stroke();
+      ctx.fillStyle='#090d16';ctx.fillRect(W/2-78,10,156,15);ctx.fillRect(W/2-78,H-25,156,15);line(W/2-78,20,W/2+78,20,'#ff628f',5);line(W/2-78,H-20,W/2+78,H-20,'#54e6e6',5);
+      if(clutch==='active'&&mode==='laser'){ctx.strokeStyle='#ff628f';ctx.lineWidth=2;ctx.globalAlpha=.55;ctx.beginPath();ctx.arc(player.x,player.y,190,0,Math.PI*2);ctx.stroke();ctx.globalAlpha=1;const d=Math.hypot(player.x-puck.x,player.y-puck.y);if(d<190)line(player.x,player.y,puck.x,puck.y,'#ff628f',2)}
+      circle(cpu.x,cpu.y,cpu.r+5,'#351528');circle(cpu.x,cpu.y,cpu.r,'#ff628f');circle(cpu.x-7,cpu.y-7,8,'#ffb0c6');
+      circle(player.x,player.y,player.r+5,mode==='laser'&&clutch==='active'?'#5a223c':'#153f49');circle(player.x,player.y,player.r,'#54e6e6');circle(player.x-7,player.y-7,8,'#b5ffff');
+      circle(puck.x+3,puck.y+4,puck.r+2,'#080b12');circle(puck.x,puck.y,puck.r,'#ffd166');circle(puck.x-4,puck.y-4,4,'#fff3bd');
+      if(serveTimer>0){ctx.fillStyle='#dce9f6';ctx.font='700 13px monospace';ctx.textAlign='center';ctx.fillText('READY',W/2,H/2-84)}
+    }
+    function updateUi(){const usb=document.querySelector('#usb'),gyro=document.querySelector('#gyro'),control=document.querySelector('#control');usb.textContent=connected?'USB live':'USB waiting';usb.className='chip '+(connected?'live':'');gyro.textContent=calibrated?'gyro ready':'keep still';gyro.className='chip '+(calibrated?'live':'');control.textContent=clutch==='active'?(mode==='laser'?'magnet active':'moving'):(clutch==='arming'?'hold…':'controls idle');control.className='chip '+(clutch==='active'?(mode==='laser'?'power':'live'):'');document.querySelector('#headline').textContent=clutch==='active'?(mode==='laser'?'MAGNET ACTIVE':'PADDLE MOVING'):'HOLD MOVE + TILT';document.querySelector('#detail').textContent=mode==='laser'&&clutch==='active'?'pink ring is magnetic range':'LASER adds magnetic pull';canvas.dataset.mode=mode;canvas.dataset.clutch=clutch;canvas.dataset.playerX=Math.round(player.x);canvas.dataset.playerY=Math.round(player.y);canvas.dataset.cpuX=Math.round(cpu.x);canvas.dataset.cpuY=Math.round(cpu.y);canvas.dataset.cpuIntent=cpuIntent;canvas.dataset.puckSpeed=Math.round(Math.hypot(puck.vx,puck.vy));canvas.dataset.puckX=Math.round(puck.x);canvas.dataset.puckY=Math.round(puck.y)}
+    function frame(t){const dt=Math.min(.035,(t-last)/1000);last=t;flash=Math.max(0,flash-dt);update(dt);draw();updateUi();requestAnimationFrame(frame)}requestAnimationFrame(frame);
+    const events=new EventSource('/events');events.onmessage=e=>{const d=JSON.parse(e.data);if(d.type==='status'){connected=d.status.startsWith('Connected');return}if(d.type==='airmouse'){mode=d.mode||'none';clutch=d.clutch||'idle';calibrated=!!d.calibrated;return}if(d.type==='cursor'){mode=d.mode||mode;movePaddle(player,player.x+d.dx*2.2,player.y+d.dy*2.2,.02)}};events.onerror=()=>connected=false;
+    function point(e){const r=canvas.getBoundingClientRect();return{x:(e.clientX-r.left)*W/r.width,y:(e.clientY-r.top)*H/r.height}}
+    canvas.addEventListener('pointermove',e=>{if(mouseControl){const p=point(e);movePaddle(player,p.x,p.y,.02)}});canvas.addEventListener('pointerdown',e=>{mouseControl=true;const p=point(e);movePaddle(player,p.x,p.y,.02);mode='laser';clutch='active';canvas.setPointerCapture(e.pointerId)});canvas.addEventListener('pointerup',()=>{clutch='idle';mode='none'});canvas.addEventListener('pointercancel',()=>{clutch='idle';mode='none'});
+  </script>
+</body>
+</html>

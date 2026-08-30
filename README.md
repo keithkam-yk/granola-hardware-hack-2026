@@ -30,6 +30,17 @@ shows two hold controls: **MOVE** aims without attracting the cat, while
 **LASER** aims a red point that Marmalade chases. Releasing either control
 immediately freezes the pointer.
 
+Open <http://127.0.0.1:8765/hockey> for a single-player air-hockey control
+study. **MOVE** steers the cyan paddle; **LASER** steers while adding a
+short-range magnetic pull on the puck. The computer controls the pink paddle.
+
+Open <http://127.0.0.1:8765/doodle> for the motion-controlled QuickDraw demo.
+Rotate the controller at any time to aim the brush. Hold the touchscreen
+**LASER** button while rotating to paint; releasing ends the stroke and asks
+the local model to guess the doodle. Hold **MOVE** to clear the canvas. Install
+`doodle_demo/requirements.txt` and run the dashboard with
+`doodle_demo/.venv/bin/python dashboard.py` to enable prediction.
+
 ## Use the air mouse
 
 1. Leave the board still for the first two seconds after reset while the gyro

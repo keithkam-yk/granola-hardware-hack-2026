@@ -133,6 +133,8 @@
       <button id="clear">Clear history</button>
       <button id="openFlight">Open flight demo</button>
       <button id="openCat">Open cat demo</button>
+      <button id="openHockey">Open air hockey</button>
+      <button id="openDoodle">Open air doodle</button>
       <label for="window">Window</label>
       <select id="window"><option value="5">5 seconds</option><option value="10" selected>10 seconds</option><option value="20">20 seconds</option></select>
       <label for="sampleEvery">Plot</label>
@@ -354,6 +356,8 @@
     document.querySelector('#clear').onclick = () => history.length = 0;
     document.querySelector('#openFlight').onclick = () => { window.location.href = '/flight'; };
     document.querySelector('#openCat').onclick = () => { window.location.href = '/cat'; };
+    document.querySelector('#openHockey').onclick = () => { window.location.href = '/hockey'; };
+    document.querySelector('#openDoodle').onclick = () => { window.location.href = '/doodle'; };
     document.querySelector('#resetPointer').onclick = centerPointer;
     window.addEventListener('resize', drawPointer);
     const sensitivity = document.querySelector('#sensitivity');
