@@ -614,7 +614,7 @@ function update(dt) {
   if (hud) {
     const height = groundY === null ? state.pos.y : state.pos.y - groundY;
     hud.textContent =
-      `${board.live ? 'BOARD' : 'keys'}   ${(state.speed*3.6).toFixed(0)} km/h   ` +
+      `${board.live ? 'FLAP FLAP DEUCE' : 'keys'}   ${(state.speed*3.6).toFixed(0)} km/h   ` +
       `${height.toFixed(0)} m up   ${(state.stamina).toFixed(0)}% wing   ` +
       (state.perched ? 'perched — press SPACE'
        : state.speed < TUNE.speedStall + 1.5 ? 'STALLING — FLAP'
