@@ -1,6 +1,24 @@
 CONFIG_IDF_TARGET="esp32s3"
+
+# The console is the game's control link, so it must be the native USB port and
+# nothing else may print to it.
 CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
 CONFIG_ESP_CONSOLE_SECONDARY_NONE=y
+CONFIG_LOG_DEFAULT_LEVEL_WARN=y
+
 CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
 CONFIG_PARTITION_TABLE_SINGLE_APP_LARGE=y
 CONFIG_FREERTOS_HZ=1000
+
+# 8MB octal PSRAM. The LVGL draw buffer has to live here: an internal DMA-capable
+# draw buffer stripes this CO5300 panel, which is the single flag that resisted
+# ~20 fixes over two days on the sibling board.
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_OCT=y
+CONFIG_SPIRAM_SPEED_80M=y
+CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=4096
+
+# Fonts the HUD draws with. LVGL only links the sizes that are switched on.
+CONFIG_LV_FONT_MONTSERRAT_14=y
+CONFIG_LV_FONT_MONTSERRAT_20=y
+CONFIG_LV_FONT_MONTSERRAT_28=y
