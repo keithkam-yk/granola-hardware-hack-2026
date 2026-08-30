@@ -166,7 +166,7 @@ black box:
 ```
 #net know 2 networks
 #net remember host 192.168.5.12:41235
-#net joining Granola guest at -49 dBm
+#net joining NETWORK at -49 dBm
 #net ip=192.168.4.76
 #net host 192.168.5.12:41235
 ```
