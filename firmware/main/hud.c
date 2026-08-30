@@ -18,6 +18,13 @@ static const char *TAG = "hud";
 #define COLOR_PANEL   0x121820
 #define COLOR_DIM     0x6A7686
 
+// The board is flown on its side, so the panel runs landscape: 448 wide by 368
+// tall. Every coordinate below is in that frame. The IMU has to be rotated the
+// same way, and does it against this constant so the two cannot drift apart.
+#define HUD_ROTATION  LV_DISPLAY_ROTATION_270
+#define DISP_W        BSP_LCD_V_RES
+#define DISP_H        BSP_LCD_H_RES
+
 // One card per hardpoint: the weapon, its ammo, and which button fires it.
 typedef struct {
     lv_obj_t *card;
@@ -79,8 +86,8 @@ static void build_weapon_card(int side, int x)
 
     card->card = lv_obj_create(lv_screen_active());
     lv_obj_remove_style_all(card->card);
-    lv_obj_set_size(card->card, 168, 118);
-    lv_obj_set_pos(card->card, x, 312);
+    lv_obj_set_size(card->card, 200, 104);
+    lv_obj_set_pos(card->card, x, DISP_H - 120);
     lv_obj_set_style_radius(card->card, 10, 0);
     lv_obj_set_style_bg_opa(card->card, LV_OPA_COVER, 0);
     lv_obj_set_style_bg_color(card->card, lv_color_hex(COLOR_PANEL), 0);
@@ -104,19 +111,12 @@ esp_err_t hud_start(hud_tap_cb_t on_tap)
 {
     s_hud.on_tap = on_tap;
 
-    // The draw buffer must live in PSRAM. An internal DMA-capable buffer
-    // stripes this CO5300 panel, and that one flag is worth more than every
-    // other display setting on this board put together.
-    const bsp_display_cfg_t cfg = {
-        .lvgl_port_cfg = ESP_LVGL_PORT_INIT_CONFIG(),
-        .buffer_size = BSP_LCD_H_RES * 40,
-        .double_buffer = false,
-        .flags = {
-            .buff_dma = false,
-            .buff_spiram = true,
-        },
-    };
-    if (bsp_display_start_with_config(&cfg) == NULL) {
+    // The BSP builds its own LVGL display config and ignores the buffer fields
+    // of bsp_display_cfg_t, so there is nothing to pass here: draw-buffer size
+    // and placement are Kconfig settings (CONFIG_BSP_DISPLAY_LVGL_*), not
+    // arguments.
+    lv_display_t *display = bsp_display_start();
+    if (display == NULL) {
         ESP_LOGE(TAG, "display init failed");
         return ESP_FAIL;
     }
@@ -124,19 +124,23 @@ esp_err_t hud_start(hud_tap_cb_t on_tap)
 
     bsp_display_lock(0);
 
+    // The LVGL task is already running by now, so the rotation has to be set
+    // under the same mutex as every other lv_ call.
+    bsp_display_rotate(display, HUD_ROTATION);
+
     lv_obj_t *scr = lv_screen_active();
     lv_obj_set_style_bg_color(scr, lv_color_hex(COLOR_BG), 0);
     lv_obj_set_style_pad_all(scr, 0, 0);
 
     lv_obj_t *title = make_label(scr, &lv_font_montserrat_14, COLOR_DIM, "HULL");
-    lv_obj_align(title, LV_ALIGN_TOP_LEFT, 16, 18);
+    lv_obj_align(title, LV_ALIGN_TOP_LEFT, 16, 14);
 
     s_hud.hull_pct = make_label(scr, &lv_font_montserrat_28, 0xFFFFFF, "--%");
-    lv_obj_align(s_hud.hull_pct, LV_ALIGN_TOP_RIGHT, -16, 8);
+    lv_obj_align(s_hud.hull_pct, LV_ALIGN_TOP_RIGHT, -16, 6);
 
     s_hud.hull_bar = lv_bar_create(scr);
-    lv_obj_set_size(s_hud.hull_bar, 336, 14);
-    lv_obj_set_pos(s_hud.hull_bar, 16, 52);
+    lv_obj_set_size(s_hud.hull_bar, DISP_W - 32, 14);
+    lv_obj_set_pos(s_hud.hull_bar, 16, 48);
     lv_obj_set_style_bg_color(s_hud.hull_bar, lv_color_hex(COLOR_PANEL), 0);
     lv_obj_set_style_bg_color(s_hud.hull_bar, lv_color_hex(COLOR_OK), LV_PART_INDICATOR);
     lv_obj_set_style_radius(s_hud.hull_bar, 7, 0);
@@ -145,15 +149,15 @@ esp_err_t hud_start(hud_tap_cb_t on_tap)
 
     // Wings sit either side of the fuselage in the same layout as the plane, so
     // "the left one is red" needs no translating while you are flying.
-    s_hud.wing_l   = make_section(scr, 96, 34, 24, 150);
-    s_hud.fuselage = make_section(scr, 88, 96, 140, 118);
-    s_hud.wing_r   = make_section(scr, 96, 34, 248, 150);
+    s_hud.wing_l   = make_section(scr, 140, 32, 30, 126);
+    s_hud.fuselage = make_section(scr, 90, 92, 179, 96);
+    s_hud.wing_r   = make_section(scr, 140, 32, 278, 126);
 
     s_hud.speed = make_label(scr, &lv_font_montserrat_20, COLOR_DIM, "--- kt");
-    lv_obj_align(s_hud.speed, LV_ALIGN_TOP_MID, 0, 258);
+    lv_obj_align(s_hud.speed, LV_ALIGN_TOP_MID, 0, 210);
 
     build_weapon_card(0, 16);
-    build_weapon_card(1, 184);
+    build_weapon_card(1, DISP_W - 216);
 
     bsp_display_unlock();
     return ESP_OK;
