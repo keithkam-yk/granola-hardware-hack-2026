@@ -124,9 +124,26 @@ function attitude(sample, frame) {
   };
 }
 
-// The link arrives in bursts every 20-80 ms; easing costs a few milliseconds
-// and stops the needles twitching between packets.
-const smooth = (previous, next) => previous + (next - previous) * 0.25;
+// Painting when a packet happens to arrive makes every network stall visible as
+// a frozen needle. The display runs on its own 60 Hz clock instead and eases
+// towards the newest reading, so a 300 ms gap shows up as a slightly slower
+// needle rather than a stutter. Games do this; a debug page has the same problem.
+function paint() {
+  for (const view of cards.values()) {
+    if (view.target) {
+      view.roll += (view.target.roll - view.roll) * 0.12;
+      view.pitch += (view.target.pitch - view.pitch) * 0.12;
+    }
+    setAxis(view.rollFill, view.rollValue, view.roll);
+    setAxis(view.pitchFill, view.pitchValue, view.pitch);
+    if (view.quality) {
+      const since = Math.round(performance.now() - view.at_ms);
+      view.quality.textContent = since > 200 ? `link stalled ${since} ms` : '';
+    }
+  }
+  requestAnimationFrame(paint);
+}
+requestAnimationFrame(paint);
 
 // A frame measured earlier is the normal case, so a reload flies rather than
 // asking for five poses again. Saved on the host, not in this browser, so the
@@ -144,6 +161,7 @@ function card(name) {
   root.innerHTML = `
     <div class="name"></div>
     <div class="meta"></div>
+    <div class="meta" data-quality></div>
     <div class="calibrate"><div class="step"></div></div>
     <div class="axis"><span>roll</span><div class="track"><div class="fill" data-roll></div></div><span class="value" data-roll-v>0&deg;</span></div>
     <div class="axis"><span>pitch</span><div class="track"><div class="fill" data-pitch></div></div><span class="value" data-pitch-v>0&deg;</span></div>
@@ -160,6 +178,7 @@ function card(name) {
     banner: root.querySelector('.calibrate'),
     step: root.querySelector('.step'),
     meta: root.querySelector('.meta'),
+    quality: root.querySelector('[data-quality]'),
     left: root.querySelector('[data-left]'),
     right: root.querySelector('[data-right]'),
     rollFill: root.querySelector('[data-roll]'),
@@ -230,18 +249,14 @@ new EventSource('/stream').onmessage = function (event) {
     if (view.frame) {
       view.banner.className = 'calibrate done';
       view.step.textContent = 'Calibrated. Both triggers together to start over.';
-      const measured = attitude(last, view.frame);
-      view.roll = smooth(view.roll, measured.roll);
-      view.pitch = smooth(view.pitch, measured.pitch);
+      view.target = attitude(last, view.frame);
+      view.at_ms = performance.now();
     } else {
       view.banner.className = 'calibrate';
       view.step.innerHTML =
         'Step ' + (view.at + 1) + ' of ' + POSES.length + ': ' +
         POSES[view.at].say + ', then press BOOT';
     }
-
-    setAxis(view.rollFill, view.rollValue, view.roll);
-    setAxis(view.pitchFill, view.pitchValue, view.pitch);
 
     view.left.classList.toggle('on', boot);
     view.right.classList.toggle('on', pwr);
