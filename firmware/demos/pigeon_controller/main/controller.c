@@ -14,6 +14,7 @@
 #include "freertos/task.h"
 
 #include "controller.h"
+#include "hud.h"
 #include "link.h"
 
 #define QMI_ADDR       0x6B
@@ -164,10 +165,22 @@ static void controller_task(void *arg)
             link_sendf("#cols seq,t_us,ax,ay,az,gx,gy,gz,btn_l,btn_r");
         }
 
+        const int boot = gpio_get_level(PIN_BOOT) == 0 ? 1 : 0;
+
+        // The wire carries levels, because the game wants to derive its own
+        // edges. The panel wants the edge itself, and wants it here rather than
+        // from anything the host sends back, so a wingbeat animates the instant
+        // the thumb moves even with the link down.
+        static int was_boot, was_pwr;
+        if (boot && !was_boot) hud_action(0);
+        if (pwr && !was_pwr) hud_action(1);
+        was_boot = boot;
+        was_pwr = pwr;
+
         link_sendf("%lu,%lu,%d,%d,%d,%d,%d,%d,%d,%d",
                    (unsigned long)seq++, (unsigned long)t_us,
                    v[0], v[1], v[2], v[3], v[4], v[5],
-                   gpio_get_level(PIN_BOOT) == 0 ? 1 : 0, pwr);
+                   boot, pwr);
     }
 }
 

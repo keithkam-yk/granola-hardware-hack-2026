@@ -9,6 +9,19 @@
 
 static const char *TAG = "hud";
 
+// The panel art, embedded by CMakeLists and shared with demos/pigeon_preview.
+extern const uint8_t pigeon_screen_start[] asm("_binary_pigeon_screen_rgb565_start");
+extern const uint8_t flap_frames_start[] asm("_binary_flap_wings_animation_v1_argb8888_start");
+extern const uint8_t deuce_frames_start[] asm("_binary_deuce_payload_animation_v1_argb8888_start");
+
+#define ART_W 448
+#define ART_H 368
+#define ACTION_FRAMES 4
+#define FLAP_W 84
+#define FLAP_H 67
+#define DEUCE_W 56
+#define DEUCE_H 84
+
 // Damage reads as a colour before it reads as a number, so the same three
 // steps are used everywhere: intact, hurt, failing.
 #define COLOR_OK      0x35D07F
@@ -43,6 +56,71 @@ static struct {
     weapon_card_t weapon[2];
     hud_tap_cb_t on_tap;
 } s_hud;
+
+// One action loop: four predecoded frames and where on the panel it sits.
+typedef struct {
+    lv_image_dsc_t frames[ACTION_FRAMES];
+    lv_obj_t *image;
+    lv_timer_t *timer;
+    int frame;
+    const uint16_t *durations_ms;
+} action_t;
+
+static const uint16_t s_flap_durations_ms[ACTION_FRAMES] = {110, 90, 110, 90};
+static const uint16_t s_deuce_durations_ms[ACTION_FRAMES] = {140, 120, 180, 260};
+static action_t s_flap = { .durations_ms = s_flap_durations_ms };
+static action_t s_deuce = { .durations_ms = s_deuce_durations_ms };
+
+static lv_image_dsc_t s_screen_image = {
+    .header = { .magic = LV_IMAGE_HEADER_MAGIC, .cf = LV_COLOR_FORMAT_RGB565,
+                .flags = 0, .w = ART_W, .h = ART_H,
+                .stride = ART_W * sizeof(uint16_t), .reserved_2 = 0 },
+    .data_size = ART_W * ART_H * sizeof(uint16_t),
+    .data = pigeon_screen_start,
+    .reserved = NULL,
+};
+
+// Frames are stored back to back, so each one is just an offset into the blob.
+static void describe_frames(action_t *action, const uint8_t *blob, uint32_t w, uint32_t h)
+{
+    const uint32_t bytes = w * h * 4;
+    for (int i = 0; i < ACTION_FRAMES; i++) {
+        action->frames[i] = (lv_image_dsc_t){
+            .header = { .magic = LV_IMAGE_HEADER_MAGIC, .cf = LV_COLOR_FORMAT_ARGB8888,
+                        .flags = 0, .w = w, .h = h, .stride = w * 4, .reserved_2 = 0 },
+            .data_size = bytes,
+            .data = blob + (uint32_t)i * bytes,
+            .reserved = NULL,
+        };
+    }
+}
+
+// Advances one frame, and hides the loop again once it has played out. A press
+// during playback restarts it rather than queuing, because a pigeon beating
+// twice quickly should look like two beats, not like one beat played late.
+static void action_tick(lv_timer_t *timer)
+{
+    action_t *action = lv_timer_get_user_data(timer);
+    action->frame++;
+    if (action->frame >= ACTION_FRAMES) {
+        lv_obj_add_flag(action->image, LV_OBJ_FLAG_HIDDEN);
+        lv_timer_pause(timer);
+        return;
+    }
+    lv_image_set_src(action->image, &action->frames[action->frame]);
+    lv_timer_set_period(timer, action->durations_ms[action->frame]);
+}
+
+static void action_play(action_t *action)
+{
+    if (!action->image) return;
+    action->frame = 0;
+    lv_image_set_src(action->image, &action->frames[0]);
+    lv_obj_remove_flag(action->image, LV_OBJ_FLAG_HIDDEN);
+    lv_timer_set_period(action->timer, action->durations_ms[0]);
+    lv_timer_reset(action->timer);
+    lv_timer_resume(action->timer);
+}
 
 static lv_color_t damage_color(int health)
 {
@@ -157,6 +235,35 @@ esp_err_t hud_start(hud_tap_cb_t on_tap)
     s_hud.speed = make_label(scr, &lv_font_montserrat_20, COLOR_DIM, "--- kt");
     lv_obj_align(s_hud.speed, LV_ALIGN_TOP_MID, 0, 200);
 
+    // The pigeon panel goes in behind everything. The dogfight instruments are
+    // kept rather than deleted — the widgets and hud_set() still work — but
+    // hidden, because this is a bird now and hull integrity means nothing to it.
+    lv_obj_t *art = lv_image_create(scr);
+    lv_image_set_src(art, &s_screen_image);
+    lv_obj_set_pos(art, 0, 0);
+    lv_obj_move_background(art);
+    lv_obj_t *const instruments[] = {
+        s_hud.hull_bar, s_hud.hull_pct, s_hud.wing_l, s_hud.wing_r,
+        s_hud.fuselage, s_hud.speed,
+        s_hud.weapon[0].card, s_hud.weapon[1].card,
+    };
+    for (size_t i = 0; i < sizeof(instruments)/sizeof(instruments[0]); i++) {
+        if (instruments[i]) lv_obj_add_flag(instruments[i], LV_OBJ_FLAG_HIDDEN);
+    }
+
+    describe_frames(&s_flap, flap_frames_start, FLAP_W, FLAP_H);
+    describe_frames(&s_deuce, deuce_frames_start, DEUCE_W, DEUCE_H);
+    s_flap.image = lv_image_create(scr);
+    lv_obj_align(s_flap.image, LV_ALIGN_BOTTOM_LEFT, 46, -54);
+    lv_obj_add_flag(s_flap.image, LV_OBJ_FLAG_HIDDEN);
+    s_flap.timer = lv_timer_create(action_tick, 110, &s_flap);
+    lv_timer_pause(s_flap.timer);
+    s_deuce.image = lv_image_create(scr);
+    lv_obj_align(s_deuce.image, LV_ALIGN_BOTTOM_RIGHT, -60, -46);
+    lv_obj_add_flag(s_deuce.image, LV_OBJ_FLAG_HIDDEN);
+    s_deuce.timer = lv_timer_create(action_tick, 140, &s_deuce);
+    lv_timer_pause(s_deuce.timer);
+
     s_hud.link = make_label(scr, &lv_font_montserrat_14, COLOR_DIM, "starting");
     lv_obj_align(s_hud.link, LV_ALIGN_TOP_MID, 0, 228);
 
@@ -174,6 +281,14 @@ static void set_weapon(int side, const hud_weapon_t *weapon)
     lv_label_set_text_fmt(card->ammo, "%d", weapon->ammo);
     lv_obj_set_style_text_color(card->ammo,
                                weapon->ammo == 0 ? lv_color_hex(COLOR_CRIT) : lv_color_hex(COLOR_OK), 0);
+}
+
+void hud_action(int side)
+{
+    if (!s_flap.image) return;
+    bsp_display_lock(0);
+    action_play(side ? &s_flap : &s_deuce);
+    bsp_display_unlock();
 }
 
 void hud_set_link(const char *status)

@@ -30,6 +30,12 @@ esp_err_t hud_start(hud_tap_cb_t on_tap);
 // Redraws the panel. Safe to call from any task except an LVGL callback.
 void hud_set(const hud_state_t *state);
 
+// Plays the wingbeat or the drop on the panel. side is 0 for BOOT (drop) and
+// 1 for PWR (flap), matching the button columns in the sample stream. Called
+// on the press itself rather than on anything coming back from the host, so
+// the panel answers the thumb immediately even when the link is down.
+void hud_action(int side);
+
 // One line on the panel saying where the board is up to in finding a game.
 // Without it, a controller that will not connect is a black box you have to
 // take back to a laptop to interrogate.
