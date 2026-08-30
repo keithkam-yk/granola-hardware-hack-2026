@@ -66,6 +66,27 @@ orientation filter this game flies on.
 
 ```
 ./flash.sh                    # build + flash the controller
-DOGFIGHT_PROBE=1 ./flash.sh   # build + flash the button-discovery probe
-host/monitor.sh               # watch the raw serial stream
+./run.sh                      # start the game host
+```
+
+Then open the address `run.sh` prints from any browser on the same wifi: a
+laptop, a phone, the TV.
+
+A board needs to be told the network once. With the host stopped so the port is
+free, send it the credentials over its own USB link:
+
+```
+printf '!wifi ssid=NETWORK pass=SECRET\n' > /dev/cu.usbmodem101
+```
+
+They are written to NVS and survive reflashing. Nothing else needs configuring:
+the board broadcasts for a host and the host answers with the port to come back
+on, so no address is ever stored to go stale.
+
+To work on the cable instead, `./run.sh --serial /dev/cu.usbmodem101`. A board
+falls back to USB whenever its socket breaks, so it is never mute.
+
+```
+DOGFIGHT_PROBE=1 ./flash.sh   # the button-discovery probe
+host/monitor.sh               # raw serial, no host in the way
 ```
