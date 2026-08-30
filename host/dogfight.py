@@ -271,10 +271,11 @@ class Handler(BaseHTTPRequestHandler):
             body = CALIBRATION.read_bytes() if CALIBRATION.is_file() else b"null"
             return self.send_json(body)
 
-        # "/" is the link check; "/2d" serves proto-2d.html and so on, so a view
-        # is reachable the moment its file exists without touching this file.
+        # "/" is the controller page: calibration and a live check of the stick.
+        # "/2d" serves proto-2d.html and so on, so a game view is reachable the
+        # moment its file exists without touching this file.
         name = self.path.strip("/").split("?")[0]
-        page = HERE / "game.html" if not name else HERE / f"proto-{name}.html"
+        page = HERE / "controller.html" if not name else HERE / f"proto-{name}.html"
         if not name or not PAGE_NAME.fullmatch(name) or not page.is_file():
             if name:
                 return self.send_error(404, f"no view called {name}")
