@@ -1,0 +1,67 @@
+{
+  "display": {
+    "width": 448,
+    "height": 368,
+    "orientation": "landscape"
+  },
+  "palette": {
+    "background": "#07101f",
+    "panel": "#111b30",
+    "brass": "#d8892d",
+    "cream": "#f4e7c5",
+    "slate": "#7386ae",
+    "teal": "#178a8f"
+  },
+  "assets": [
+    {
+      "id": "controller-baseline",
+      "file": "runtime/controller_screen_448x368.png",
+      "width": 448,
+      "height": 368,
+      "alpha": false
+    },
+    {
+      "id": "pigeon-idle",
+      "file": "runtime/pigeon_aviator.png",
+      "width": 190,
+      "height": 216,
+      "alpha": true
+    },
+    {
+      "id": "action-flap",
+      "file": "runtime/flap_wings.png",
+      "width": 84,
+      "height": 67,
+      "alpha": true
+    },
+    {
+      "id": "action-deuce",
+      "file": "runtime/deuce_payload.png",
+      "width": 56,
+      "height": 84,
+      "alpha": true
+    },
+    {
+      "id": "action-flap-animation-v1",
+      "file": "runtime/flap_wings_animation_v1.gif",
+      "width": 84,
+      "height": 67,
+      "frames": 4,
+      "duration_ms": 400,
+      "loop": true,
+      "alpha": true,
+      "experimental": true
+    },
+    {
+      "id": "action-deuce-animation-v1",
+      "file": "runtime/deuce_payload_animation_v1.gif",
+      "width": 56,
+      "height": 84,
+      "frames": 4,
+      "duration_ms": 700,
+      "loop": true,
+      "alpha": true,
+      "experimental": true
+    }
+  ]
+}

@@ -1,0 +1,12 @@
+idf_component_register(
+    SRCS "main.c"
+    INCLUDE_DIRS "."
+    REQUIRES esp32_s3_touch_amoled_1_8 esp_driver_i2c esp_driver_gpio esp_timer esp_lvgl_port
+)
+
+target_add_binary_data(
+    ${COMPONENT_LIB}
+    "${CMAKE_CURRENT_LIST_DIR}/../../../assets/pigeon/runtime/controller_screen_448x368.rgb565"
+    BINARY
+    RENAME_TO "pigeon_screen_rgb565"
+)
