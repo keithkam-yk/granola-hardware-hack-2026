@@ -131,6 +131,8 @@
     <div class="toolbar">
       <button id="pause">Pause</button>
       <button id="clear">Clear history</button>
+      <button id="openFlight">Open flight demo</button>
+      <button id="openCat">Open cat demo</button>
       <label for="window">Window</label>
       <select id="window"><option value="5">5 seconds</option><option value="10" selected>10 seconds</option><option value="20">20 seconds</option></select>
       <label for="sampleEvery">Plot</label>
@@ -350,6 +352,8 @@
       paused = !paused; event.target.textContent = paused ? 'Resume' : 'Pause';
     };
     document.querySelector('#clear').onclick = () => history.length = 0;
+    document.querySelector('#openFlight').onclick = () => { window.location.href = '/flight'; };
+    document.querySelector('#openCat').onclick = () => { window.location.href = '/cat'; };
     document.querySelector('#resetPointer').onclick = centerPointer;
     window.addEventListener('resize', drawPointer);
     const sensitivity = document.querySelector('#sensitivity');

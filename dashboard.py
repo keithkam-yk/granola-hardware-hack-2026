@@ -225,6 +225,8 @@ class DashboardServer(ThreadingHTTPServer):
                  broker: EventBroker, reader: SerialReader) -> None:
         super().__init__(address, DashboardHandler)
         self.index_html = index_path.read_bytes()
+        self.flight_html = index_path.with_name("flight.html").read_bytes()
+        self.cat_html = index_path.with_name("cat.html").read_bytes()
         self.broker = broker
         self.reader = reader
 
@@ -239,6 +241,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         if self.path == "/":
             self._send_bytes("text/html; charset=utf-8", self.dashboard.index_html)
+        elif self.path in {"/flight", "/flight/", "/flight.html"}:
+            self._send_bytes("text/html; charset=utf-8", self.dashboard.flight_html)
+        elif self.path in {"/cat", "/cat/", "/cat.html"}:
+            self._send_bytes("text/html; charset=utf-8", self.dashboard.cat_html)
         elif self.path == "/events":
             self._stream_events()
         elif self.path == "/health":

@@ -55,8 +55,12 @@ class DeviceEventTests(unittest.TestCase):
         self.assertEqual(state["ble"], "advertising")
 
     def test_parses_relative_cursor_movement(self) -> None:
-        event = parse_device_event(b'{"type":"cursor","dx":-3,"dy":7}')
-        self.assertEqual(event, {"type": "cursor", "dx": -3, "dy": 7})
+        event = parse_device_event(
+            b'{"type":"cursor","dx":-3,"dy":7,"mode":"laser"}'
+        )
+        self.assertEqual(
+            event, {"type": "cursor", "dx": -3, "dy": 7, "mode": "laser"}
+        )
 
     def test_rejects_cursor_event_without_numeric_deltas(self) -> None:
         self.assertIsNone(parse_device_event(b'{"type":"cursor","dx":"left"}'))

@@ -7,6 +7,7 @@
 #include <string.h>
 
 #include "driver/i2c_master.h"
+#include "bsp/esp-bsp.h"
 #include "esp_bt.h"
 #include "esp_err.h"
 #include "esp_event.h"
@@ -25,9 +26,6 @@
 #undef M_PI
 #include "qmi8658.h"
 
-#define BOARD_I2C_PORT I2C_NUM_0
-#define BOARD_I2C_SCL_IO 14
-#define BOARD_I2C_SDA_IO 15
 #define IMU_PROBE_TIMEOUT_MS 100
 #define SAMPLE_PERIOD_MS 20
 #define QMI8658_RESET_REGISTER 0x60
@@ -35,13 +33,6 @@
 #define QMI8658_CTRL1_VALUE 0x60
 #define QMI8658_RESET_DELAY_MS 20
 
-#define IO_EXPANDER_ADDRESS 0x20
-#define IO_EXPANDER_OUTPUT_REG 0x01
-#define IO_EXPANDER_CONFIG_REG 0x03
-#define IO_EXPANDER_TOUCH_RESET (1U << 2)
-#define IO_EXPANDER_SD_CS (1U << 7)
-#define TOUCH_ADDRESS 0x15
-#define TOUCH_POINTS_REG 0x02
 #define TOUCH_HOLD_MS 120
 
 #define GYRO_CALIBRATION_SAMPLES 100
@@ -56,16 +47,30 @@
 #define BLE_HID_SERVICE_UUID 0x1812
 
 static const char *TAG = "motion_airmouse";
-static i2c_master_dev_handle_t s_touch_device;
 static esp_hidd_dev_t *s_hid_device;
 static volatile bool s_ble_connected;
 static volatile bool s_touch_available;
 static volatile bool s_calibrated;
 static volatile bool s_clutch_arming;
 static volatile bool s_clutch_active;
+static volatile bool s_touch_held;
 static volatile float s_sensitivity = DEFAULT_SENSITIVITY;
 static float s_gyro_bias[3];
 static uint32_t s_mouse_reports;
+static lv_obj_t *s_status_label;
+
+typedef enum {
+    CONTROL_NONE = 0,
+    CONTROL_MOVE,
+    CONTROL_LASER,
+} control_mode_t;
+
+static volatile control_mode_t s_control_mode;
+
+static const char *control_mode_name(control_mode_t mode)
+{
+    return mode == CONTROL_LASER ? "laser" : (mode == CONTROL_MOVE ? "move" : "none");
+}
 
 static const uint8_t s_mouse_report_map[] = {
     0x05, 0x01, 0x09, 0x02, 0xA1, 0x01,
@@ -98,84 +103,123 @@ static void emit_airmouse_state(void)
     const char *clutch = s_clutch_active ? "active" : (s_clutch_arming ? "arming" : "idle");
     printf(
         "{\"type\":\"airmouse\",\"ble\":\"%s\",\"clutch\":\"%s\""
-        ",\"calibrated\":%s,\"touch\":%s,\"sensitivity\":%.3f"
+        ",\"mode\":\"%s\",\"calibrated\":%s,\"touch\":%s,\"sensitivity\":%.3f"
         ",\"bias\":[%.4f,%.4f,%.4f],\"reports\":%" PRIu32 "}\n",
         s_ble_connected ? "connected" : "advertising", clutch,
+        control_mode_name(s_control_mode),
         s_calibrated ? "true" : "false", s_touch_available ? "true" : "false",
         (double)s_sensitivity, (double)s_gyro_bias[0], (double)s_gyro_bias[1],
         (double)s_gyro_bias[2], s_mouse_reports);
     fflush(stdout);
 }
 
-static esp_err_t board_i2c_init(i2c_master_bus_handle_t *bus_handle)
+static void control_button_event(lv_event_t *event)
 {
-    if (bus_handle == NULL) {
-        return ESP_ERR_INVALID_ARG;
+    const lv_event_code_t code = lv_event_get_code(event);
+    const control_mode_t mode = (control_mode_t)(intptr_t)lv_event_get_user_data(event);
+    if (code == LV_EVENT_PRESSED) {
+        s_control_mode = mode;
+        s_touch_held = true;
+        emit_airmouse_state();
+    } else if (code == LV_EVENT_RELEASED || code == LV_EVENT_PRESS_LOST) {
+        s_touch_held = false;
+        s_control_mode = CONTROL_NONE;
+        emit_airmouse_state();
     }
-    const i2c_master_bus_config_t bus_config = {
-        .i2c_port = BOARD_I2C_PORT,
-        .sda_io_num = BOARD_I2C_SDA_IO,
-        .scl_io_num = BOARD_I2C_SCL_IO,
-        .clk_source = I2C_CLK_SRC_DEFAULT,
-        .glitch_ignore_cnt = 7,
-        .flags = {.enable_internal_pullup = true},
-    };
-    return i2c_new_master_bus(&bus_config, bus_handle);
 }
 
-static esp_err_t add_i2c_device(i2c_master_bus_handle_t bus, uint8_t address,
-                                i2c_master_dev_handle_t *device)
+static lv_obj_t *create_control_button(lv_obj_t *parent, control_mode_t mode,
+                                       const char *title, const char *subtitle,
+                                       lv_color_t color)
 {
-    const i2c_device_config_t config = {
-        .dev_addr_length = I2C_ADDR_BIT_LEN_7,
-        .device_address = address,
-        .scl_speed_hz = 400000,
-    };
-    return i2c_master_bus_add_device(bus, &config, device);
+    lv_obj_t *button = lv_button_create(parent);
+    lv_obj_set_size(button, 324, 126);
+    lv_obj_set_style_radius(button, 20, 0);
+    lv_obj_set_style_bg_color(button, lv_color_hex(0x24202D), 0);
+    lv_obj_set_style_bg_opa(button, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(button, 3, 0);
+    lv_obj_set_style_border_color(button, color, 0);
+    lv_obj_set_style_shadow_width(button, 0, 0);
+    lv_obj_set_style_bg_color(button, color, LV_STATE_PRESSED);
+    lv_obj_clear_flag(button, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_event_cb(button, control_button_event, LV_EVENT_ALL, (void *)(intptr_t)mode);
+
+    lv_obj_t *title_label = lv_label_create(button);
+    lv_label_set_text(title_label, title);
+    lv_obj_set_style_text_color(title_label, lv_color_hex(0xFFF4DE), 0);
+    lv_obj_set_style_text_font(title_label, &lv_font_montserrat_14, 0);
+    lv_obj_align(title_label, LV_ALIGN_TOP_LEFT, 4, 14);
+
+    lv_obj_t *subtitle_label = lv_label_create(button);
+    lv_label_set_text(subtitle_label, subtitle);
+    lv_obj_set_style_text_color(subtitle_label, lv_color_hex(0xBDB1C8), 0);
+    lv_obj_align(subtitle_label, LV_ALIGN_BOTTOM_LEFT, 4, -14);
+
+    lv_obj_t *icon = lv_obj_create(button);
+    lv_obj_set_size(icon, 34, 34);
+    lv_obj_set_style_radius(icon, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_bg_color(icon, color, 0);
+    lv_obj_set_style_border_width(icon, 0, 0);
+    lv_obj_align(icon, LV_ALIGN_RIGHT_MID, -6, 0);
+    lv_obj_clear_flag(icon, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+    return button;
 }
 
-static esp_err_t write_i2c_register(i2c_master_dev_handle_t device, uint8_t reg, uint8_t value)
+static void ui_status_timer(lv_timer_t *timer)
 {
-    const uint8_t payload[] = {reg, value};
-    return i2c_master_transmit(device, payload, sizeof(payload), 100);
+    (void)timer;
+    if (s_status_label == NULL) {
+        return;
+    }
+    const char *text = "KEEP STILL  /  CALIBRATING";
+    if (s_calibrated) {
+        if (s_touch_held && s_control_mode == CONTROL_LASER) {
+            text = "LASER ON  /  TILT TO AIM";
+        } else if (s_touch_held && s_control_mode == CONTROL_MOVE) {
+            text = "MOVE ON  /  TILT TO AIM";
+        } else if (s_ble_connected) {
+            text = "READY  /  BLE CONNECTED";
+        } else {
+            text = "READY  /  USB LIVE";
+        }
+    }
+    lv_label_set_text(s_status_label, text);
 }
 
-static esp_err_t init_touch(i2c_master_bus_handle_t bus)
+static void create_control_ui(void)
 {
-    i2c_master_dev_handle_t expander = NULL;
-    esp_err_t result = add_i2c_device(bus, IO_EXPANDER_ADDRESS, &expander);
-    if (result != ESP_OK) {
-        return result;
+    if (!bsp_display_lock(0)) {
+        return;
     }
-    const uint8_t output_mask = IO_EXPANDER_TOUCH_RESET | IO_EXPANDER_SD_CS;
-    result = write_i2c_register(expander, IO_EXPANDER_CONFIG_REG, (uint8_t)~output_mask);
-    if (result == ESP_OK) {
-        result = write_i2c_register(expander, IO_EXPANDER_OUTPUT_REG, IO_EXPANDER_SD_CS);
-    }
-    if (result == ESP_OK) {
-        vTaskDelay(pdMS_TO_TICKS(20));
-        result = write_i2c_register(expander, IO_EXPANDER_OUTPUT_REG, output_mask);
-    }
-    if (result == ESP_OK) {
-        vTaskDelay(pdMS_TO_TICKS(150));
-        result = i2c_master_probe(bus, TOUCH_ADDRESS, 100);
-    }
-    i2c_master_bus_rm_device(expander);
-    if (result != ESP_OK) {
-        return result;
-    }
-    return add_i2c_device(bus, TOUCH_ADDRESS, &s_touch_device);
-}
+    lv_obj_t *screen = lv_screen_active();
+    lv_obj_set_style_bg_color(screen, lv_color_hex(0x17131D), 0);
+    lv_obj_set_style_bg_opa(screen, LV_OPA_COVER, 0);
+    lv_obj_clear_flag(screen, LV_OBJ_FLAG_SCROLLABLE);
 
-static bool touch_is_held(void)
-{
-    uint8_t reg = TOUCH_POINTS_REG;
-    uint8_t data[5] = {0};
-    if (s_touch_device == NULL ||
-        i2c_master_transmit_receive(s_touch_device, &reg, 1, data, sizeof(data), 20) != ESP_OK) {
-        return false;
-    }
-    return (data[0] & 0x0FU) > 0;
+    lv_obj_t *eyebrow = lv_label_create(screen);
+    lv_label_set_text(eyebrow, "POCKET CAT CONTROLLER");
+    lv_obj_set_style_text_color(eyebrow, lv_color_hex(0xE9AFAF), 0);
+    lv_obj_align(eyebrow, LV_ALIGN_TOP_MID, 0, 24);
+
+    lv_obj_t *hint = lv_label_create(screen);
+    lv_label_set_text(hint, "HOLD A BUTTON + TILT");
+    lv_obj_set_style_text_color(hint, lv_color_hex(0xFFF4DE), 0);
+    lv_obj_align(hint, LV_ALIGN_TOP_MID, 0, 54);
+
+    lv_obj_t *move = create_control_button(screen, CONTROL_MOVE, "MOVE", "pointer only",
+                                           lv_color_hex(0x6AA7A2));
+    lv_obj_align(move, LV_ALIGN_TOP_MID, 0, 92);
+
+    lv_obj_t *laser = create_control_button(screen, CONTROL_LASER, "LASER", "pointer + cat chase",
+                                            lv_color_hex(0xE85D75));
+    lv_obj_align(laser, LV_ALIGN_TOP_MID, 0, 232);
+
+    s_status_label = lv_label_create(screen);
+    lv_label_set_text(s_status_label, "KEEP STILL  /  CALIBRATING");
+    lv_obj_set_style_text_color(s_status_label, lv_color_hex(0x9A8FA6), 0);
+    lv_obj_align(s_status_label, LV_ALIGN_BOTTOM_MID, 0, -28);
+    lv_timer_create(ui_status_timer, 150, NULL);
+    bsp_display_unlock();
 }
 
 static esp_err_t detect_imu_address(i2c_master_bus_handle_t bus_handle, uint8_t *address)
@@ -462,7 +506,7 @@ static void stream_samples(qmi8658_dev_t *imu)
                     }
                 }
 
-                const bool touching = touch_is_held();
+                const bool touching = s_touch_held;
                 if (touching && !was_touching) {
                     touch_started_ms = elapsed_ms;
                     s_clutch_arming = true;
@@ -491,7 +535,8 @@ static void stream_samples(qmi8658_dev_t *imu)
                     const int8_t dx = report_delta(filtered_x * s_sensitivity, &remainder_x);
                     const int8_t dy = report_delta(filtered_y * s_sensitivity, &remainder_y);
                     if (dx != 0 || dy != 0) {
-                        printf("{\"type\":\"cursor\",\"dx\":%d,\"dy\":%d}\n", dx, dy);
+                        printf("{\"type\":\"cursor\",\"dx\":%d,\"dy\":%d,\"mode\":\"%s\"}\n",
+                               dx, dy, control_mode_name(s_control_mode));
                         fflush(stdout);
                     }
                     send_mouse_report(dx, dy);
@@ -511,15 +556,16 @@ static void stream_samples(qmi8658_dev_t *imu)
 
 void app_main(void)
 {
-    i2c_master_bus_handle_t bus_handle = NULL;
-    ESP_ERROR_CHECK(board_i2c_init(&bus_handle));
-    esp_err_t touch_result = init_touch(bus_handle);
-    s_touch_available = touch_result == ESP_OK;
+    lv_display_t *display = bsp_display_start();
+    s_touch_available = display != NULL && bsp_display_get_input_dev() != NULL;
     if (!s_touch_available) {
-        ESP_LOGE(TAG, "CST820 touch controller unavailable: %s", esp_err_to_name(touch_result));
+        ESP_LOGE(TAG, "Display or touch controller unavailable");
     } else {
-        ESP_LOGI(TAG, "CST820 touch clutch ready at 0x%02x", TOUCH_ADDRESS);
+        create_control_ui();
+        ESP_LOGI(TAG, "Touch controls ready: MOVE and LASER");
     }
+    i2c_master_bus_handle_t bus_handle = bsp_i2c_get_handle();
+    ESP_ERROR_CHECK(bus_handle == NULL ? ESP_FAIL : ESP_OK);
 
     uint8_t address = 0;
     esp_err_t result = detect_imu_address(bus_handle, &address);

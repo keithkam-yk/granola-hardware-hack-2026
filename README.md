@@ -21,6 +21,15 @@ over USB before Bluetooth is paired: hold the touchscreen, rotate the board,
 and watch the pointer move. It uses only the Python standard library, so there
 are no host Python packages to install.
 
+Open <http://127.0.0.1:8765/flight> for the low-poly flight demo. Hold the
+touchscreen and rotate the controller to bank and pitch; release the screen to
+return the flight controls smoothly to neutral.
+
+Open <http://127.0.0.1:8765/cat> for the cozy pixel-art cat demo. The board
+shows two hold controls: **MOVE** aims without attracting the cat, while
+**LASER** aims a red point that Marmalade chases. Releasing either control
+immediately freezes the pointer.
+
 ## Use the air mouse
 
 1. Leave the board still for the first two seconds after reset while the gyro
@@ -28,8 +37,10 @@ are no host Python packages to install.
    **Gyro calibrated**.
 2. In the computer's Bluetooth settings, connect **QMI8658 Air Mouse**. USB
    stays connected for power, flashing, logs, live graphing, and settings.
-3. Touch and hold the board's screen. After 120 ms, the dashboard shows
-   **Clutch active** and wrist rotation moves the pointer.
+3. Touch and hold either **MOVE** or **LASER** on the board's screen. After
+   120 ms, the dashboard shows **Clutch active** and wrist rotation moves the
+   pointer. Both modes behave as a normal air mouse; the laser distinction is
+   also included in the USB event stream for interactive demos.
 4. Lift your finger to stop movement immediately. The next hold starts from the
    new wrist position, so there is no accumulated absolute pointer pose.
 

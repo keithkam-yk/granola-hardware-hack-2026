@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Marmalade's Rainy Evening</title>
+  <style>
+    :root { color-scheme: dark; --ink:#fff1d7; --muted:#b7a6b5; --plum:#211927; --wine:#4b2638; --rose:#f06f82; --mint:#78b5a5; }
+    * { box-sizing:border-box; }
+    body { margin:0; min-height:100vh; overflow:hidden; background:#15101a; color:var(--ink); font-family:ui-monospace,SFMono-Regular,Menlo,monospace; }
+    .shell { height:100vh; display:grid; grid-template-rows:auto 1fr auto; padding:18px; gap:12px; background:radial-gradient(circle at 50% 120%,#3b2431 0,#17111c 55%); }
+    header,footer { width:min(1120px,100%); margin:auto; display:flex; align-items:center; justify-content:space-between; gap:14px; }
+    .title small { display:block; color:#d899a3; font-size:10px; letter-spacing:.18em; text-transform:uppercase; margin-bottom:5px; }
+    h1 { margin:0; font:700 clamp(18px,2.2vw,30px)/1 ui-monospace,SFMono-Regular,Menlo,monospace; letter-spacing:-.04em; }
+    .status { display:flex; gap:8px; flex-wrap:wrap; justify-content:flex-end; }
+    .chip { border:1px solid #5c4a5c; background:#251c2a; padding:7px 10px; font-size:10px; text-transform:uppercase; letter-spacing:.08em; color:var(--muted); }
+    .chip.live { color:#c9f1df; border-color:#568b7d; }
+    .chip.laser { color:#ffd7dc; border-color:#d3576b; background:#4a2330; }
+    .stage { min-height:0; width:min(1120px,100%); margin:auto; position:relative; display:grid; place-items:center; }
+    .frame { width:100%; max-height:100%; aspect-ratio:16/9; position:relative; border:4px solid #573849; box-shadow:0 0 0 4px #241824,0 18px 60px #080609; background:#211927; }
+    canvas { display:block; width:100%; height:100%; image-rendering:pixelated; image-rendering:crisp-edges; touch-action:none; cursor:crosshair; }
+    .mode-card { position:absolute; top:12px; left:12px; padding:8px 10px; background:#1b1420dd; border:2px solid #5c4054; font-size:10px; color:#dbc8d5; pointer-events:none; }
+    .mode-card strong { color:#fff0d1; }
+    footer { color:#9e8c9d; font-size:10px; line-height:1.5; }
+    footer a { color:#d7b8c2; text-decoration:none; border-bottom:1px solid #6b4a5a; }
+    footer span:last-child { text-align:right; }
+    @media (max-width:680px) { .shell{padding:10px}.status{display:none}.frame{border-width:3px} footer span:last-child{display:none} }
+  </style>
+</head>
+<body>
+  <main class="shell">
+    <header>
+      <div class="title"><small>QMI8658 motion toy</small><h1>Marmalade's Rainy Evening</h1></div>
+      <div class="status"><span class="chip" id="usb">USB waiting</span><span class="chip" id="gyro">gyro waiting</span><span class="chip" id="mode">buttons idle</span></div>
+    </header>
+    <section class="stage">
+      <div class="frame">
+        <canvas id="game" width="480" height="270" aria-label="A cozy pixel art room where a cat chases a motion-controlled laser pointer"></canvas>
+        <div class="mode-card"><strong id="prompt">HOLD MOVE OR LASER</strong><br><span id="subprompt">then tilt the controller</span></div>
+      </div>
+    </section>
+    <footer><span><a href="/">sensor lab</a> · <a href="/flight">flight demo</a></span><span>ESP: hold MOVE to aim · hold LASER to make Marmalade chase</span></footer>
+  </main>
+  <script>
+    const canvas=document.querySelector('#game'),ctx=canvas.getContext('2d'); ctx.imageSmoothingEnabled=false;
+    const W=canvas.width,H=canvas.height, pointer={x:340,y:168}, cat={x:146,y:219,vx:0,vy:0,face:1,run:0};
+    let clutch='idle',mode='none',connected=false,calibrated=false,last=performance.now(),pounce=0,blink=0,mouseFallback=false;
+    const clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
+    function rect(x,y,w,h,c){ctx.fillStyle=c;ctx.fillRect(Math.round(x),Math.round(y),Math.round(w),Math.round(h));}
+    function poly(points,c){ctx.fillStyle=c;ctx.beginPath();ctx.moveTo(points[0][0],points[0][1]);for(let i=1;i<points.length;i++)ctx.lineTo(points[i][0],points[i][1]);ctx.closePath();ctx.fill();}
+    function text(t,x,y,c='#fff1d7',align='left'){ctx.fillStyle=c;ctx.font='8px monospace';ctx.textAlign=align;ctx.fillText(t,x,y);}
+    function drawRoom(t){
+      rect(0,0,W,206,'#37263b'); rect(0,0,W,12,'#211725');
+      for(let x=8;x<W;x+=24){rect(x,24,2,3,'#50344c');rect(x+10,46,2,3,'#50344c');rect(x,68,2,3,'#50344c');rect(x+10,90,2,3,'#50344c');}
+      rect(0,206,W,64,'#5a3840'); for(let y=212;y<H;y+=12)rect(0,y,W,2,'#422932'); for(let x=0;x<W;x+=40)rect(x+(Math.floor(x/40)%2?20:0),206,2,64,'#482d35');
+      rect(35,32,128,104,'#211a2e');rect(39,36,120,96,'#332f4b');rect(96,36,5,96,'#6b4a58');rect(39,82,120,5,'#6b4a58');
+      rect(43,40,52,38,'#27344c');rect(104,40,51,38,'#27344c');rect(43,90,52,38,'#27344c');rect(104,90,51,38,'#27344c');
+      for(let i=0;i<14;i++){let rx=(i*37+Math.floor(t*.018))%112+42,ry=(i*23+Math.floor(t*.038))%86+39;rect(rx,ry,1,6,'#8190a8');}
+      rect(27,136,144,8,'#231923');rect(31,144,136,4,'#75485a');
+      rect(382,35,58,6,'#261a25');rect(386,41,8,28,'#a85e59');rect(397,41,6,28,'#d49668');rect(407,41,10,28,'#6c8791');rect(421,41,5,28,'#d7ad72');rect(429,41,7,28,'#8b5c7e');
+      rect(405,113,44,93,'#2b2029');rect(411,119,32,83,'#6e4a42');rect(417,126,20,28,'#e7b26d');rect(421,131,12,18,'#fff0b0');
+      poly([[397,112],[457,112],[446,84],[409,84]],'#ad6d66');rect(425,84,6,28,'#80504f');
+      rect(365,190,46,16,'#2b2029');rect(371,177,34,13,'#8e5b4e');rect(377,168,22,9,'#b97958');
+      rect(267,53,50,49,'#251c29');rect(271,57,42,41,'#785467');poly([[276,90],[292,66],[307,90]],'#d5a06f');rect(287,82,11,12,'#f3c789');
+      rect(186,205,164,6,'#39262e');poly([[179,239],[196,214],[341,214],[359,239],[341,258],[197,258]],'#81505f');
+      for(let x=205;x<338;x+=18)rect(x,229,8,4,'#c98276');for(let x=213;x<345;x+=24)rect(x,242,10,4,'#5f8a82');
+      rect(331,168,52,38,'#32232f');rect(338,158,38,48,'#4c3444');rect(343,151,28,55,'#5d3d50');
+      rect(346,159,22,30,'#77556b');
+      rect(194,170,20,36,'#6a493e');rect(191,166,26,7,'#3f703f');rect(183,158,12,14,'#527d48');rect(212,153,10,18,'#5f8a4f');rect(196,149,11,19,'#739559');
+    }
+    function drawCat(t){
+      const x=Math.round(cat.x),y=Math.round(cat.y),f=cat.face,run=Math.abs(cat.vx)>12,step=Math.floor(t/90)%2;
+      ctx.save();ctx.translate(x,y);ctx.scale(f,1);
+      const body='#c77a4d',light='#e5a36b',dark='#7b4638',cream='#f2c58c';
+      let bob=run?step:0;
+      poly([[-22,-9-bob],[-15,-20-bob],[6,-23-bob],[20,-16-bob],[23,-6-bob],[14,1],[-14,1]],body);
+      rect(-11,-18-bob,16,8,light);rect(-18,-12-bob,5,5,dark);rect(5,-18-bob,6,4,dark);
+      poly([[12,-19-bob],[17,-31-bob],[22,-21-bob]],body);poly([[23,-20-bob],[29,-30-bob],[31,-17-bob]],body);rect(14,-22-bob,17,17,body);
+      rect(17,-17-bob,3,3,'#2a2026');rect(26,-17-bob,3,3,'#2a2026');rect(22,-12-bob,3,2,'#7d3e50');rect(20,-9-bob,7,2,cream);
+      if(!run){rect(19,-18-bob,2,2,blink>0?'#c77a4d':'#2a2026');rect(27,-18-bob,2,2,blink>0?'#c77a4d':'#2a2026');}
+      if(run){rect(-14,-1,7,7,body);rect(8,-1,7,7,body);if(step){rect(-19,4,11,3,dark);rect(8,4,11,3,dark);}else{rect(-12,4,11,3,dark);rect(2,4,11,3,dark);}}
+      else {rect(-11,-2,8,9,body);rect(8,-2,8,9,body);rect(-12,5,12,3,dark);rect(8,5,12,3,dark);}
+      ctx.strokeStyle=dark;ctx.lineWidth=5;ctx.beginPath();ctx.moveTo(-20,-9);ctx.quadraticCurveTo(-36,-18,-28,-30);ctx.quadraticCurveTo(-23,-36,-17,-30);ctx.stroke();
+      ctx.restore();
+    }
+    function drawPointer(t){
+      const active=clutch==='active';
+      if(mode==='laser'&&active){
+        const pulse=2+(Math.floor(t/140)%2);rect(pointer.x-pulse,pointer.y-pulse,pulse*2+1,pulse*2+1,'#ff405f');rect(pointer.x-1,pointer.y-1,3,3,'#fff0e8');
+      } else {ctx.strokeStyle=active?'#f3dbad':'#9b8798';ctx.lineWidth=1;ctx.beginPath();ctx.moveTo(pointer.x-6,pointer.y);ctx.lineTo(pointer.x+6,pointer.y);ctx.moveTo(pointer.x,pointer.y-6);ctx.lineTo(pointer.x,pointer.y+6);ctx.stroke();}
+    }
+    function update(dt,t){
+      const chase=clutch==='active'&&mode==='laser', dx=pointer.x-cat.x,dy=pointer.y-(cat.y-18),dist=Math.hypot(dx,dy);
+      if(chase){cat.face=dx<0?-1:1;if(dist>20){cat.vx+=clamp(dx*.9,-80,80)*dt;cat.vx*=Math.pow(.05,dt);cat.x+=cat.vx*dt;if(pointer.y<180&&dist<105&&pounce<=0)pounce=.5;}else cat.vx*=Math.pow(.02,dt);}
+      else{cat.vx*=Math.pow(.025,dt);cat.x+=cat.vx*dt;}
+      if(pounce>0){pounce-=dt;cat.y=219-Math.sin((.5-pounce)/.5*Math.PI)*24;}else cat.y=219;
+      cat.x=clamp(cat.x,32,W-34);cat.run+=Math.abs(cat.vx)*dt;
+      if(Math.random()<dt*.25)blink=.12;blink=Math.max(0,blink-dt);
+      canvas.dataset.mode=mode;canvas.dataset.clutch=clutch;canvas.dataset.pointerX=Math.round(pointer.x);canvas.dataset.pointerY=Math.round(pointer.y);canvas.dataset.catX=Math.round(cat.x);
+      document.querySelector('#usb').textContent=connected?'USB live':'USB waiting';document.querySelector('#usb').className='chip '+(connected?'live':'');
+      document.querySelector('#gyro').textContent=calibrated?'gyro ready':'keep still';document.querySelector('#gyro').className='chip '+(calibrated?'live':'');
+      const modeChip=document.querySelector('#mode');modeChip.textContent=clutch==='active'?(mode==='laser'?'laser active':'move active'):(clutch==='arming'?'hold…':'buttons idle');modeChip.className='chip '+(mode==='laser'&&clutch==='active'?'laser':clutch==='active'?'live':'');
+      document.querySelector('#prompt').textContent=chase?'LASER ON · CHASE!':clutch==='active'?'POINTER MOVING':'HOLD MOVE OR LASER';
+      document.querySelector('#subprompt').textContent=chase?'Marmalade sees it':clutch==='active'?'cat stays cozy':'then tilt the controller';
+    }
+    function frame(t){const dt=Math.min(.04,(t-last)/1000);last=t;update(dt,t);drawRoom(t);drawCat(t);drawPointer(t);requestAnimationFrame(frame);}requestAnimationFrame(frame);
+    const events=new EventSource('/events');
+    events.onmessage=e=>{const d=JSON.parse(e.data);if(d.type==='status'){connected=d.status.startsWith('Connected');return;}if(d.type==='airmouse'){mode=d.mode||'none';clutch=d.clutch||'idle';calibrated=!!d.calibrated;return;}if(d.type==='cursor'){mode=d.mode||mode;pointer.x=clamp(pointer.x+d.dx*1.6,8,W-8);pointer.y=clamp(pointer.y+d.dy*1.6,18,H-18);}};
+    events.onerror=()=>connected=false;
+    function localPoint(e){const r=canvas.getBoundingClientRect();pointer.x=(e.clientX-r.left)*W/r.width;pointer.y=(e.clientY-r.top)*H/r.height;}
+    canvas.addEventListener('pointermove',e=>{if(mouseFallback)localPoint(e)});canvas.addEventListener('pointerdown',e=>{mouseFallback=true;localPoint(e);mode='laser';clutch='active';canvas.setPointerCapture(e.pointerId)});canvas.addEventListener('pointerup',()=>{clutch='idle';mode='none'});canvas.addEventListener('pointercancel',()=>{clutch='idle';mode='none'});
+  </script>
+</body>
+</html>

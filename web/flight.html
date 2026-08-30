@@ -1,0 +1,265 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>QMI8658 Low-Poly Flight</title>
+  <style>
+    :root { color-scheme: dark; --ink:#f4fbff; --muted:#a8bdc7; --glass:rgba(7,20,29,.58); --line:rgba(255,255,255,.18); --mint:#86ffd0; --amber:#ffd77d; }
+    * { box-sizing: border-box; }
+    html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; background: #78c9df; font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    canvas { display: block; width: 100%; height: 100%; }
+    .chrome { position: fixed; inset: 0; pointer-events: none; color: var(--ink); text-shadow: 0 2px 12px rgba(0,0,0,.34); }
+    .topbar { position: absolute; left: 22px; right: 22px; top: 20px; display: flex; justify-content: space-between; align-items: flex-start; gap: 18px; }
+    .brand h1 { margin: 2px 0 3px; font-size: clamp(20px, 3vw, 34px); letter-spacing: -.045em; }
+    .brand p { margin: 0; color: rgba(244,251,255,.74); font-size: 12px; letter-spacing: .12em; text-transform: uppercase; }
+    .actions { display: flex; gap: 8px; pointer-events: auto; }
+    .action { display: inline-flex; align-items: center; border: 1px solid var(--line); border-radius: 10px; padding: 9px 12px; color: var(--ink); background: var(--glass); text-decoration: none; font: inherit; font-size: 12px; cursor: pointer; backdrop-filter: blur(12px); }
+    .action:hover { background: rgba(7,20,29,.76); }
+    .status { position: absolute; right: 22px; bottom: 20px; display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+    .badge { border: 1px solid var(--line); border-radius: 999px; padding: 7px 10px; color: rgba(244,251,255,.72); background: var(--glass); font-size: 10px; font-weight: 760; letter-spacing: .09em; text-transform: uppercase; backdrop-filter: blur(12px); }
+    .badge.live { color: var(--mint); border-color: rgba(134,255,208,.45); }
+    .badge.active { color: #092118; background: var(--mint); border-color: var(--mint); text-shadow: none; box-shadow: 0 0 28px rgba(134,255,208,.4); }
+    .telemetry { position: absolute; left: 22px; bottom: 20px; display: grid; grid-template-columns: repeat(3, auto); gap: 8px; }
+    .readout { min-width: 86px; border-left: 2px solid rgba(255,255,255,.6); padding: 3px 10px; }
+    .readout small { display: block; color: rgba(244,251,255,.65); font-size: 9px; font-weight: 750; letter-spacing: .13em; text-transform: uppercase; }
+    .readout strong { display: block; margin-top: 2px; font: 700 17px ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .help { position: absolute; left: 50%; bottom: 24px; transform: translateX(-50%); border: 1px solid var(--line); border-radius: 999px; padding: 9px 14px; background: var(--glass); color: rgba(244,251,255,.82); font-size: 12px; white-space: nowrap; backdrop-filter: blur(12px); transition: .2s ease; }
+    .help.active { color: var(--mint); border-color: rgba(134,255,208,.5); }
+    .reticle { position: absolute; left: 50%; top: 50%; width: 76px; height: 44px; margin: -22px -38px; opacity: .9; }
+    .reticle::before { content:""; position:absolute; left:0; right:0; top:21px; height:2px; background:var(--ink); clip-path:polygon(0 0, 31% 0, 31% 100%, 69% 100%, 69% 0, 100% 0, 100% 100%, 0 100%); }
+    .reticle::after { content:""; position:absolute; left:37px; top:12px; width:2px; height:20px; background:var(--ink); }
+    @media (max-width:720px) { .telemetry { bottom: 70px; } .status { bottom: 16px; left: 18px; right: 18px; justify-content: center; } .help { bottom: 118px; } .brand p { display:none; } .action { padding: 8px 9px; } }
+  </style>
+</head>
+<body>
+  <canvas id="scene" aria-label="Low-poly landscape flight simulator"></canvas>
+  <div class="chrome">
+    <div class="topbar">
+      <div class="brand"><p id="region">Generating region…</p><h1>Low-Poly Flight</h1></div>
+      <div class="actions"><button class="action" id="regenerate">New landscape</button><a class="action" href="/">← Motion lab</a></div>
+    </div>
+    <div class="reticle"></div>
+    <div class="telemetry">
+      <div class="readout"><small>Altitude</small><strong id="altitude">840 m</strong></div>
+      <div class="readout"><small>Airspeed</small><strong id="speed">120 kt</strong></div>
+      <div class="readout"><small>Heading</small><strong id="heading">000°</strong></div>
+    </div>
+    <div class="help" id="help">Hold touchscreen, then rotate to fly</div>
+    <div class="status"><span class="badge" id="serial">USB waiting</span><span class="badge" id="gyro">Gyro calibrating</span><span class="badge" id="clutch">Clutch idle</span></div>
+  </div>
+  <script>
+    const canvas = document.querySelector('#scene');
+    const ctx = canvas.getContext('2d');
+    let width = 1, height = 1, dpr = 1;
+    let last = performance.now(), distance = 0, heading = 0, altitude = 840;
+    let targetRoll = 0, targetPitch = 0, roll = 0, pitch = 0;
+    let clutchActive = false;
+    let landscape;
+
+    const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
+    const mix = (a, b, t) => a + (b - a) * t;
+
+    function seededRandom(seed) {
+      return () => {
+        seed |= 0; seed = seed + 0x6d2b79f5 | 0;
+        let value = Math.imul(seed ^ seed >>> 15, 1 | seed);
+        value = value + Math.imul(value ^ value >>> 7, 61 | value) ^ value;
+        return ((value ^ value >>> 14) >>> 0) / 4294967296;
+      };
+    }
+
+    function generateLandscape() {
+      const seed = crypto.getRandomValues(new Uint32Array(1))[0];
+      const random = seededRandom(seed);
+      const first = ['Copper', 'Cedar', 'Juniper', 'Amber', 'Silver', 'Echo', 'Willow', 'Sage'];
+      const lastNames = ['Reach', 'Valley', 'Highlands', 'Basin', 'Pass', 'Wilds', 'Delta', 'Range'];
+      const hue = Math.round(55 + random() * 92);
+      const mountainHue = Math.round(hue + 12 + random() * 25);
+      const makeRidge = count => Array.from({length:count}, () => .25 + random() * .78);
+      landscape = {
+        seed,
+        name: `${first[Math.floor(random()*first.length)]} ${lastNames[Math.floor(random()*lastNames.length)]}`,
+        ridges: [makeRidge(12), makeRidge(12)],
+        mountainColors: [`hsl(${mountainHue} 18% 56%)`, `hsl(${mountainHue} 23% 38%)`],
+        ground: [
+          `hsl(${hue} 25% 35%)`, `hsl(${hue+9} 29% 42%)`,
+          `hsl(${hue-12} 31% 47%)`, `hsl(${hue+18} 21% 31%)`,
+          `hsl(${hue-20} 37% 54%)`
+        ],
+        sky: [`hsl(${190 + random()*24} 62% 61%)`, `hsl(${177 + random()*18} 43% 82%)`, `hsl(${35 + random()*18} 72% 81%)`],
+        sunX: .18 + random() * .64,
+        sunSize: 22 + random() * 25,
+        waterX: .34 + random() * .32,
+        waterWidth: .18 + random() * .34,
+        waterBend: (random() - .5) * .9,
+        feature: random() < .72 ? 'river' : 'road'
+      };
+      distance = 0;
+      canvas.dataset.seed = String(seed);
+      document.querySelector('#region').textContent = `${landscape.name} · ${seed.toString(16).slice(0,6).toUpperCase()}`;
+    }
+
+    function terrainTone(row, col, phase) {
+      let value = Math.imul(col + phase + 104729, 374761393) ^ Math.imul(row + landscape.seed, 668265263);
+      value = (value ^ value >>> 13) * 1274126177;
+      return Math.abs(value ^ value >>> 16) % landscape.ground.length;
+    }
+
+    function resize() {
+      dpr = Math.min(2, window.devicePixelRatio || 1);
+      width = window.innerWidth; height = window.innerHeight;
+      canvas.width = Math.round(width * dpr); canvas.height = Math.round(height * dpr);
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    }
+
+    function steer(dx, dy) {
+      if (!clutchActive) return;
+      targetRoll = clamp(targetRoll + dx * .008, -.95, .95);
+      targetPitch = clamp(targetPitch + dy * .006, -.52, .52);
+    }
+
+    function setClutch(state) {
+      clutchActive = state === 'active';
+      const clutch = document.querySelector('#clutch');
+      const help = document.querySelector('#help');
+      clutch.textContent = state === 'active' ? 'Clutch active' : state === 'arming' ? 'Hold…' : 'Clutch idle';
+      clutch.className = `badge ${state === 'active' ? 'active' : ''}`;
+      help.textContent = state === 'active' ? 'Flying — lift to level the controls' : state === 'arming' ? 'Keep holding…' : 'Hold touchscreen, then rotate to fly';
+      help.classList.toggle('active', state === 'active');
+    }
+
+    function polygon(points, fill) {
+      ctx.beginPath(); ctx.moveTo(points[0][0], points[0][1]);
+      for (let i = 1; i < points.length; i++) ctx.lineTo(points[i][0], points[i][1]);
+      ctx.closePath(); ctx.fillStyle = fill; ctx.fill();
+    }
+
+    function drawSky(horizon) {
+      const sky = ctx.createLinearGradient(0, 0, 0, horizon);
+      sky.addColorStop(0, landscape.sky[0]); sky.addColorStop(.72, landscape.sky[1]); sky.addColorStop(1, landscape.sky[2]);
+      ctx.fillStyle = sky; ctx.fillRect(0, 0, width, Math.max(height, horizon));
+      const sunX = width * landscape.sunX - Math.sin(heading) * width * .12;
+      const sunY = Math.max(65, horizon * .42);
+      ctx.fillStyle = 'rgba(255,238,169,.92)'; ctx.beginPath(); ctx.arc(sunX, sunY, landscape.sunSize, 0, Math.PI * 2); ctx.fill();
+    }
+
+    function drawMountains(horizon) {
+      const drift = Math.sin(heading * .65) * width * .18;
+      const layers = [
+        {base:horizon + 24, amp:145, color:landscape.mountainColors[0], offset:-80},
+        {base:horizon + 48, amp:105, color:landscape.mountainColors[1], offset:30}
+      ];
+      layers.forEach((layer, layerIndex) => {
+        const step = width / 9;
+        const points = [[0, layer.base]];
+        for (let i = -1; i <= 10; i++) {
+          const ridge = landscape.ridges[layerIndex][(i + 12) % landscape.ridges[layerIndex].length];
+          points.push([i * step + drift * (layerIndex ? .7 : .35) + layer.offset, layer.base - layer.amp * ridge]);
+        }
+        points.push([width, height], [0, height]); polygon(points, layer.color);
+      });
+    }
+
+    function drawTerrain(horizon) {
+      const rows = 12, cols = 12;
+      const groundTop = horizon + 35;
+      for (let row = 0; row < rows; row++) {
+        const z0 = row / rows, z1 = (row + 1) / rows;
+        const y0 = groundTop + (height - groundTop) * z0 * z0;
+        const y1 = groundTop + (height - groundTop) * z1 * z1;
+        const scale0 = .12 + z0 * 1.12, scale1 = .12 + z1 * 1.12;
+        const scroll = (distance * (1 + row * .16)) % (width / cols);
+        for (let col = -2; col < cols + 2; col++) {
+          const center = width / 2 + Math.sin(heading) * width * .5;
+          const x0 = center + ((col / cols) * width - width / 2 - scroll) * scale0;
+          const x1 = center + (((col + 1) / cols) * width - width / 2 - scroll) * scale0;
+          const x2 = center + (((col + 1) / cols) * width - width / 2 - scroll) * scale1;
+          const x3 = center + ((col / cols) * width - width / 2 - scroll) * scale1;
+          const phase = Math.floor(distance / 80);
+          const tone = terrainTone(row, col, phase);
+          polygon([[x0,y0],[x1,y0],[x3,y1]], landscape.ground[tone]);
+          polygon([[x1,y0],[x2,y1],[x3,y1]], landscape.ground[(tone + 1 + row % 2) % landscape.ground.length]);
+        }
+      }
+    }
+
+    function drawRoute(horizon) {
+      const top = horizon + 38;
+      const bend = (Math.sin(distance * .0012 + heading) * .14 + landscape.waterBend) * width;
+      const center = width * landscape.waterX;
+      const half = landscape.waterWidth * width * .5;
+      if (landscape.feature === 'river') {
+        polygon([[center-4,top],[center+5,top],[center+half+bend,height],[center-half+bend,height]], 'rgba(43,126,154,.88)');
+        polygon([[center-1,top],[center+2,top],[center+half*.32+bend,height],[center-half*.32+bend,height]], 'rgba(137,213,215,.58)');
+      } else {
+        polygon([[center-3,top],[center+3,top],[center+half*.42+bend,height],[center-half*.42+bend,height]], 'rgba(213,190,140,.9)');
+        ctx.save(); ctx.setLineDash([18, 22]); ctx.lineWidth = 3; ctx.strokeStyle = 'rgba(255,240,190,.75)';
+        ctx.beginPath(); ctx.moveTo(center, top); ctx.lineTo(center+bend, height); ctx.stroke(); ctx.restore();
+      }
+    }
+
+    function drawAircraft() {
+      ctx.save(); ctx.translate(width/2, height*.63); ctx.rotate(roll * .45);
+      polygon([[-84,8],[-16,-3],[-7,-40],[0,-48],[8,-39],[18,-3],[86,9],[82,18],[14,11],[9,42],[0,48],[-10,41],[-15,11],[-81,17]], 'rgba(241,247,237,.95)');
+      polygon([[-84,8],[-16,-3],[0,4],[-81,17]], '#d34c3e');
+      polygon([[0,-48],[8,-39],[18,-3],[0,4]], '#f4bf4f');
+      ctx.fillStyle = 'rgba(7,24,31,.72)'; ctx.beginPath(); ctx.ellipse(0,-12,7,15,0,0,Math.PI*2); ctx.fill();
+      ctx.restore();
+    }
+
+    function frame(now) {
+      const dt = Math.min(.04, (now - last) / 1000); last = now;
+      if (!clutchActive) { targetRoll *= Math.pow(.06, dt); targetPitch *= Math.pow(.06, dt); }
+      roll = mix(roll, targetRoll, 1 - Math.pow(.012, dt));
+      pitch = mix(pitch, targetPitch, 1 - Math.pow(.02, dt));
+      heading = (heading + roll * dt * .28 + Math.PI * 2) % (Math.PI * 2);
+      altitude = clamp(altitude - pitch * dt * 120, 120, 2400);
+      distance += dt * 78;
+
+      const horizon = clamp(height * (.43 - pitch * .28), height*.2, height*.68);
+      ctx.save(); ctx.translate(width/2, height/2); ctx.rotate(-roll*.18); ctx.translate(-width/2,-height/2);
+      drawSky(horizon); drawMountains(horizon); drawTerrain(horizon); drawRoute(horizon); ctx.restore();
+      drawAircraft();
+      document.querySelector('#altitude').textContent = `${Math.round(altitude)} m`;
+      document.querySelector('#speed').textContent = `${Math.round(120 + Math.abs(pitch)*18)} kt`;
+      document.querySelector('#heading').textContent = `${String(Math.round(heading * 180 / Math.PI) % 360).padStart(3,'0')}°`;
+      canvas.dataset.roll = roll.toFixed(3);
+      canvas.dataset.pitch = pitch.toFixed(3);
+      requestAnimationFrame(frame);
+    }
+
+    const source = new EventSource('/events');
+    source.onopen = () => { const badge = document.querySelector('#serial'); badge.textContent = 'USB live'; badge.className = 'badge live'; };
+    source.onerror = () => { const badge = document.querySelector('#serial'); badge.textContent = 'USB reconnecting'; badge.className = 'badge'; };
+    source.onmessage = event => {
+      const data = JSON.parse(event.data);
+      if (data.type === 'cursor') steer(Number(data.dx), Number(data.dy));
+      if (data.type === 'airmouse') {
+        setClutch(data.clutch || 'idle');
+        const gyro = document.querySelector('#gyro');
+        gyro.textContent = data.calibrated ? 'Gyro calibrated' : 'Keep board still';
+        gyro.className = `badge ${data.calibrated ? 'live' : ''}`;
+      }
+    };
+
+    const keys = new Set();
+    window.addEventListener('keydown', event => {
+      if (!event.key.startsWith('Arrow')) return;
+      event.preventDefault(); keys.add(event.key); clutchActive = true;
+      if (event.key === 'ArrowLeft') targetRoll -= .09;
+      if (event.key === 'ArrowRight') targetRoll += .09;
+      if (event.key === 'ArrowUp') targetPitch -= .065;
+      if (event.key === 'ArrowDown') targetPitch += .065;
+      targetRoll = clamp(targetRoll, -.95, .95); targetPitch = clamp(targetPitch, -.52, .52);
+    });
+    window.addEventListener('keyup', event => {
+      keys.delete(event.key);
+      if (![...keys].some(key => key.startsWith('Arrow')) && !document.querySelector('#clutch').classList.contains('active')) clutchActive = false;
+    });
+
+    document.querySelector('#regenerate').onclick = generateLandscape;
+    window.addEventListener('resize', resize); generateLandscape(); resize(); requestAnimationFrame(frame);
+  </script>
+</body>
+</html>
