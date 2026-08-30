@@ -35,6 +35,8 @@
 
 <h1>Dogfight controllers</h1>
 <p class="hint">Link check, not the game. Tilt a board and its bars move; press a trigger and it lights.
+   <strong>Hold both triggers at once to centre</strong> — whatever pose the board is in becomes level,
+   so you never have to reach for the laptop while flying.
    The panel test pushes damage back down to that board's screen.</p>
 <div id="players"><p class="empty">Waiting for a controller to find this host…</p></div>
 
@@ -156,6 +158,14 @@ new EventSource('/stream').onmessage = event => {
     if (!last) continue;
 
     view.last = last;
+
+    // Centring belongs on the thing in your hands. Both triggers at once is a
+    // gesture no weapon uses, and it fires on the edge so holding them does not
+    // re-level continuously while you fly.
+    const bothHeld = last[8] === 1 && last[9] === 1;
+    if (bothHeld && !view.bothHeld) view.frame = frameFrom([last[2], last[3], last[4]]);
+    view.bothHeld = bothHeld;
+
     const { roll, pitch } = attitude(last, view.frame);
     view.roll = smooth(view.roll, roll);
     view.pitch = smooth(view.pitch, pitch);
