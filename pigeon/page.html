@@ -1,0 +1,60 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pigeon — London</title>
+<style>
+  :root { color-scheme: dark; }
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #0a0f16; }
+  canvas { display: block; }
+  body { font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; color: #e8edf4; }
+  #hud {
+    position: fixed; left: 18px; bottom: 16px; padding: 8px 12px;
+    background: rgba(5,10,18,.62); border-radius: 8px; letter-spacing: .04em;
+    pointer-events: none; white-space: pre;
+  }
+  #hint {
+    position: fixed; left: 50%; top: 42%; transform: translate(-50%,-50%);
+    padding: 18px 24px; background: rgba(5,10,18,.78); border-radius: 12px;
+    text-align: center; line-height: 1.9; pointer-events: none;
+    transition: opacity .5s; max-width: 420px;
+  }
+  #hint.gone { opacity: 0; }
+  #loading {
+    position: fixed; left: 50%; top: 12%; transform: translateX(-50%);
+    padding: 10px 16px; background: rgba(5,10,18,.7); border-radius: 8px;
+  }
+  kbd {
+    background: #1d2732; border: 1px solid #2c3a4a; border-radius: 4px;
+    padding: 1px 6px; font: inherit;
+  }
+  #credit {
+    position: fixed; right: 12px; bottom: 12px; color: #6a7686; font-size: 11px;
+    pointer-events: none;
+  }
+</style>
+
+<script>
+  // Caught before the module runs, so a failure to boot says why on screen
+  // instead of leaving a blank blue page and no clue.
+  addEventListener('error', event => {
+    window.__bootError = (event.error && event.error.stack) || event.message;
+    const el = document.getElementById('loading');
+    if (el) el.textContent = window.__bootError.split('\n')[0];
+  });
+</script>
+
+<div id="loading">loading London…</div>
+<div id="hint">
+  <b>You are a pigeon.</b><br>
+  <kbd>Space</kbd> — one press, one wingbeat<br>
+  about once a second holds you level · two or three climbs<br>
+  stop and you glide, badly, like a real pigeon<br>
+  <kbd>move mouse</kbd> steer and look · <kbd>click</kbd> to capture the pointer<br>
+  <kbd>R</kbd> back to the start
+</div>
+<div id="hud"></div>
+<div id="credit">3D tiles © Google</div>
+
+<script type="module">
+/*BUNDLE*/
+</script>

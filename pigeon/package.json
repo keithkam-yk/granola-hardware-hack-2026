@@ -1,0 +1,10 @@
+{
+  "name": "dogfight-pigeon",
+  "private": true,
+  "type": "module",
+  "description": "Build-time only. The game ships as the single bundled host/proto-pigeon.html; these are the sources build.sh flattens into it.",
+  "dependencies": {
+    "three": "0.185.1",
+    "3d-tiles-renderer": "0.5.1"
+  }
+}

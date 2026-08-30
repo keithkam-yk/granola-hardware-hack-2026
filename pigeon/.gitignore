@@ -1,0 +1,5 @@
+node_modules/
+package-lock.json
+
+# The Google Maps Platform key. Never committed — see README.
+google-key.txt
