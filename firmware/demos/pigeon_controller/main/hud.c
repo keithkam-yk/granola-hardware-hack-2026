@@ -270,6 +270,27 @@ esp_err_t hud_start(hud_tap_cb_t on_tap)
     build_weapon_card(0, 16);
     build_weapon_card(1, DISP_W - 216);
 
+    // Hide the dogfight panel by walking the screen, and do it here at the very
+    // end. Hiding a fixed list earlier missed the weapon cards, which are built
+    // below it — so BOOT and PWR stayed on screen and, being newer objects,
+    // drew straight over the wingbeat. Walking cannot miss whatever is added
+    // next either.
+    for (uint32_t i = 0; i < lv_obj_get_child_count(scr); i++) {
+        lv_obj_add_flag(lv_obj_get_child(scr, i), LV_OBJ_FLAG_HIDDEN);
+    }
+    lv_obj_remove_flag(art, LV_OBJ_FLAG_HIDDEN);
+    // Centred and in front. Everything else on this screen is hidden by the loop
+    // above, so there is nothing for it to cover, and centring means it still
+    // shows if the panel's logical size is not the 448x368 the art was cut for.
+    lv_obj_center(art);
+    lv_obj_move_foreground(art);
+    // The link line is the one instrument worth keeping: a controller that will
+    // not connect is otherwise a black box you have to take to a laptop.
+    lv_obj_remove_flag(s_hud.link, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_move_foreground(s_hud.link);
+    lv_obj_move_foreground(s_flap.image);
+    lv_obj_move_foreground(s_deuce.image);
+
     bsp_display_unlock();
     return ESP_OK;
 }
