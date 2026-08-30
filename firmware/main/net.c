@@ -256,6 +256,12 @@ esp_err_t net_start(void)
     if (have) ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &config));
 
     ESP_ERROR_CHECK(esp_wifi_start());
+
+    // Modem power save parks the radio between beacons: ICMP to this board sat
+    // at a 6 ms floor with a 105 ms average, and the stick arrived in bursts
+    // instead of a stream. It has to be set after the driver is started to
+    // stick. A controller runs for one session, so the power is not worth it.
+    ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_NONE));
     if (!have) link_sendf("#net no network stored; send: !wifi ssid=NAME pass=SECRET");
 
     return xTaskCreate(host_task, "net_host", 4096, NULL, 4, NULL) == pdPASS

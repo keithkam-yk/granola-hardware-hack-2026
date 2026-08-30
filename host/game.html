@@ -39,13 +39,24 @@
 <div id="players"><p class="empty">Waiting for a controller to find this host…</p></div>
 
 <script>
-// Roll and pitch straight off gravity. Good enough to prove a link end to end;
-// the game views run a real orientation filter instead.
-function attitude(sample, accelScale) {
-  const [ax, ay, az] = sample.slice(2, 5).map(v => v * accelScale);
+// Roll and pitch in the frame the pilot actually holds, not the board's native
+// portrait one. The panel runs at LV_DISPLAY_ROTATION_270, which maps screen
+// right to device +y and screen up to device +x; measured flat on a desk, this
+// IMU reads az = -1g screen-up, so its +z points into the screen and the axis
+// out towards the pilot is -az.
+//
+// Getting this wrong is what made roll snap between +180 and -180: computed in
+// the wrong frame, both arguments to atan2 sit near zero and the angle rides
+// on noise.
+const RIGHT = sample => sample[3];    //  ay
+const UP    = sample => sample[2];    //  ax
+const OUT   = sample => -sample[4];   // -az
+
+function attitude(sample) {
+  const right = RIGHT(sample), up = UP(sample), out = OUT(sample);
   return {
-    roll: Math.atan2(ay, az) * 180 / Math.PI,
-    pitch: Math.atan2(-ax, Math.hypot(ay, az)) * 180 / Math.PI,
+    roll: Math.atan2(right, up) * 180 / Math.PI,
+    pitch: Math.atan2(out, Math.hypot(right, up)) * 180 / Math.PI,
   };
 }
 
@@ -107,15 +118,17 @@ new EventSource('/stream').onmessage = event => {
     const last = player.samples.at(-1);
     if (!last) continue;
 
-    const scale = player.header.acc_scale_g || 8 / 32768;
-    const { roll, pitch } = attitude(last, scale);
+    const { roll, pitch } = attitude(last);
     setAxis(view.rollFill, view.rollValue, roll);
     setAxis(view.pitchFill, view.pitchValue, pitch);
 
     view.left.classList.toggle('on', last[8] === 1);
     view.right.classList.toggle('on', last[9] === 1);
+    // Raw axes stay on screen: if the frame above is wrong, the numbers say so
+    // immediately instead of after another round of guessing.
     view.meta.textContent =
-      `${player.header.rate_hz || '?'} Hz · ${player.dropped} dropped · seq ${last[0]}`;
+      `${player.header.rate_hz || '?'} Hz · ${player.dropped} dropped · ` +
+      `ax ${last[2]} ay ${last[3]} az ${last[4]}`;
   }
 };
 </script>
