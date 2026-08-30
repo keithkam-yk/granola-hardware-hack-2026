@@ -132,20 +132,43 @@ Open the address `run.sh` prints from any browser on the same wifi:
 | `/2d` | one shared screen, both planes |
 | `/3d` | split screen, third-person over London |
 
-A board needs to be told the network once. With the host stopped so the port is
-free:
+### Connecting
+
+A board is told a network once and then never again. With the host stopped so
+the port is free:
 
 ```
 printf '!wifi ssid=NETWORK pass=SECRET\n' > /dev/cu.usbmodem101
 ```
 
 Credentials go to NVS and survive reflashing; they never pass through the host
-or a build. The board then broadcasts for a host and the host answers with the
-port to come back on, so no address is stored to go stale. Where a network hands
-out more than one subnet a broadcast cannot cross, name the host directly:
+or a build. Up to four networks are kept, so a board carried between the bench
+and the venue needs nothing said to it in either place: at power-up it scans,
+joins whichever known network is actually in the room, and prefers the strongest
+when several are.
+
+Finding the game is the same story. The board asks by broadcast and the host
+answers with the port to come back on; the address that answered is remembered,
+so from then on it goes straight there and only falls back to asking when that
+address stops replying. Where a network hands out more than one subnet a
+broadcast cannot cross, the remembered address also gives the board the right
+subnet to ask on. To seed that by hand:
 
 ```
 printf '!host ip=192.168.1.20\n' > /dev/cu.usbmodem101
+```
+
+None of this is silent. The panel shows where the board has got to — scanning,
+the network it joined, looking for game, in game — and the same story goes up
+the link, so a controller that will not connect says why instead of being a
+black box:
+
+```
+#net know 2 networks
+#net remember host 192.168.5.12:41235
+#net joining Granola guest at -49 dBm
+#net ip=192.168.4.76
+#net host 192.168.5.12:41235
 ```
 
 To work on the cable instead, `./run.sh --serial /dev/cu.usbmodem101`. A board

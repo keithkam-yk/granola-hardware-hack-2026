@@ -31,7 +31,8 @@ DISCOVERY_ASK = b"DOGFIGHT?"
 DISCOVERY_REPLY = "DOGFIGHT {port}"
 
 FLUSH_INTERVAL = 1 / 60          # one display frame's worth of samples per event
-SILENCE_TIMEOUT = 3              # seconds without a sample before a board is gone
+SILENCE_TIMEOUT = 3              # seconds without a word on any channel before a board is gone
+POLL_TIMEOUT = 1                 # how often a quiet socket wakes up to check that
 SAMPLE_COLUMNS = 10              # seq,t_us,ax,ay,az,gx,gy,gz,btn_l,btn_r
 
 # A view name may only ever be a plain word, so a request can never reach
@@ -80,8 +81,10 @@ class Controller:
         self.events = []
         self.last_seq = None
         self.alive = True
+        self.last_heard = time.monotonic()
 
     def feed(self, line):
+        self.last_heard = time.monotonic()
         if line.startswith("#"):
             if line.startswith("#DOGFIGHT"):
                 self.header = parse_banner(line)
@@ -175,7 +178,15 @@ def read_socket(sock, controller, fleet):
     pending = b""
     try:
         while True:
-            chunk = sock.recv(4096)
+            # Once samples moved to their own datagram this socket carries only
+            # the occasional banner, so its own quiet says nothing about the
+            # board. A timeout here is a chance to check, not a verdict.
+            try:
+                chunk = sock.recv(4096)
+            except socket.timeout:
+                if time.monotonic() - controller.last_heard > SILENCE_TIMEOUT:
+                    break
+                continue
             if not chunk:
                 break
             pending += chunk
@@ -200,7 +211,7 @@ def serve_controllers(fleet, tcp_port):
         # A board that reboots leaves its old socket half-open, and the reader
         # would sit in recv for ever holding a phantom player. Controllers
         # stream continuously, so silence this long means gone.
-        sock.settimeout(SILENCE_TIMEOUT)
+        sock.settimeout(POLL_TIMEOUT)
         controller = Controller(f"{addr[0]}", sock.sendall)
         threading.Thread(target=read_socket, args=(sock, controller, fleet), daemon=True).start()
 

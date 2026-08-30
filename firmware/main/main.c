@@ -58,9 +58,10 @@ static void set_host(const char *args)
     net_set_host(ip, (uint16_t)port);
 }
 
-// "!wifi ssid=NAME pass=SECRET". Networks are routinely named with spaces in
-// them, so the split is on the literal " pass=" rather than on whitespace; only
-// the password has to avoid containing that exact string.
+// "!wifi ssid=NAME pass=SECRET", said once per place rather than once per
+// session: the board keeps several and joins whichever is in the room. Networks
+// are routinely named with spaces, so the split is on the literal " pass="
+// rather than on whitespace; only the password has to avoid that exact string.
 static void set_wifi(const char *args)
 {
     const char *ssid_start = strstr(args, "ssid=");
@@ -78,7 +79,7 @@ static void set_wifi(const char *args)
     memcpy(ssid, ssid_start, length);
     ssid[length] = '\0';
 
-    net_set_credentials(ssid, pass_start ? pass_start + 6 : "");
+    net_add_network(ssid, pass_start ? pass_start + 6 : "");
 }
 
 // "!hud hp=87 wl=40 gl=CANNON al=120 ..." — every field optional, so the host

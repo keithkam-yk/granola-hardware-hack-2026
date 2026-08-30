@@ -29,3 +29,8 @@ esp_err_t hud_start(hud_tap_cb_t on_tap);
 
 // Redraws the panel. Safe to call from any task except an LVGL callback.
 void hud_set(const hud_state_t *state);
+
+// One line on the panel saying where the board is up to in finding a game.
+// Without it, a controller that will not connect is a black box you have to
+// take back to a laptop to interrogate.
+void hud_set_link(const char *status);

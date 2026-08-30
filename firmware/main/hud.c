@@ -39,6 +39,7 @@ static struct {
     lv_obj_t *wing_r;
     lv_obj_t *fuselage;
     lv_obj_t *speed;
+    lv_obj_t *link;
     weapon_card_t weapon[2];
     hud_tap_cb_t on_tap;
 } s_hud;
@@ -154,7 +155,10 @@ esp_err_t hud_start(hud_tap_cb_t on_tap)
     s_hud.wing_r   = make_section(scr, 140, 32, 278, 126);
 
     s_hud.speed = make_label(scr, &lv_font_montserrat_20, COLOR_DIM, "--- kt");
-    lv_obj_align(s_hud.speed, LV_ALIGN_TOP_MID, 0, 210);
+    lv_obj_align(s_hud.speed, LV_ALIGN_TOP_MID, 0, 200);
+
+    s_hud.link = make_label(scr, &lv_font_montserrat_14, COLOR_DIM, "starting");
+    lv_obj_align(s_hud.link, LV_ALIGN_TOP_MID, 0, 228);
 
     build_weapon_card(0, 16);
     build_weapon_card(1, DISP_W - 216);
@@ -170,6 +174,15 @@ static void set_weapon(int side, const hud_weapon_t *weapon)
     lv_label_set_text_fmt(card->ammo, "%d", weapon->ammo);
     lv_obj_set_style_text_color(card->ammo,
                                weapon->ammo == 0 ? lv_color_hex(COLOR_CRIT) : lv_color_hex(COLOR_OK), 0);
+}
+
+void hud_set_link(const char *status)
+{
+    if (!s_hud.link) return;
+    bsp_display_lock(0);
+    lv_label_set_text(s_hud.link, status);
+    lv_obj_align(s_hud.link, LV_ALIGN_TOP_MID, 0, 228);
+    bsp_display_unlock();
 }
 
 void hud_set(const hud_state_t *state)
