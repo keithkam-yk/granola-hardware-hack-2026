@@ -362,6 +362,12 @@ addEventListener('keydown', event => { if (event.code === 'KeyC') recentreBoard(
 /* ---- the world ------------------------------------------------------------ */
 
 const tiles = new TilesRenderer();
+// The tileset URL only exists once the key has been fetched and the auth plugin
+// has run. The render loop starts immediately, so without this the first frame
+// asks the renderer to load a tileset called "null", it 404s, and it stays
+// failed for the rest of the session — a blank sky with a working simulation
+// underneath it.
+let tilesReady = false;
 const draco = new DRACOLoader();
 // Google's own hosted decoder. Everything else here is vendored into the repo;
 // this one file cannot be, because the host only ever serves proto-*.html and a
@@ -389,6 +395,8 @@ async function startTiles() {
 
   // Clear the overlay when geometry actually arrives, not when the manifest
   // does: the tileset JSON lands long before there is any city to look at.
+  tilesReady = true;
+
   const waitForCity = setInterval(() => {
     if (tiles.stats.loaded > 8) {
       document.getElementById('loading')?.remove();
@@ -629,7 +637,7 @@ function frame(now) {
   last = now;
   update(dt);
   camera.updateMatrixWorld();
-  tiles.update();
+  if (tilesReady) tiles.update();
   renderer.render(scene, camera);
   requestAnimationFrame(frame);
 }
