@@ -297,7 +297,9 @@ const TILT_SPAN = 80;
 // Tilt forward to dive, back to climb. Flipped from -1 after flying it: the
 // measured frame's sign read backwards in the hand.
 const BOARD_PITCH_SIGN = 1;
-const BOARD_ROLL_SIGN = 1;
+// Tilt left to turn left. Flipped from 1 after flying it, same as the pitch sign:
+// the measured frame's roll reads mirrored in the hand.
+const BOARD_ROLL_SIGN = -1;
 
 const dot3 = (a, b) => a[0]*b[0] + a[1]*b[1] + a[2]*b[2];
 const unit3 = a => { const n = Math.hypot(a[0],a[1],a[2]) || 1; return [a[0]/n, a[1]/n, a[2]/n]; };
@@ -497,7 +499,7 @@ function update(dt) {
     (state.speed - TUNE.speedStall) / (TUNE.speedBestGlide - TUNE.speedStall), 0, 1);
   // The board's tilt outranks the pointer whenever a board is connected, so a
   // controller and a mouse never fight over the same bird.
-  const pitchInput = board.live ? board.pitch * 0.45 : look.pitch;
+  const pitchInput = board.live ? board.pitch * 0.9 : look.pitch;
   const asked = pitchInput * 0.85 * (pitchInput > 0 ? margin * margin : 1);
   const wanted = MathUtils.clamp(trim + asked, -1.35, TUNE.trimMax + 0.35);
   state.gamma += (wanted - state.gamma) * (1 - Math.exp(-dt / 0.16));
