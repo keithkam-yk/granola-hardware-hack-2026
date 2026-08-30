@@ -12,6 +12,8 @@ files intended for firmware integration.
 | `deuce_payload.png` | 56x84 | Transparent DEUCE action icon |
 | `flap_wings_animation_v1.gif` | 84x67 | Experimental four-frame FLAP loop |
 | `deuce_payload_animation_v1.gif` | 56x84 | Experimental four-frame DEUCE loop |
+| `flap_wings_animation_v1.argb8888` | 84x67x4 | Predecoded LVGL frames for firmware |
+| `deuce_payload_animation_v1.argb8888` | 56x84x4 | Predecoded LVGL frames for firmware |
 
 The separate sprites let the firmware animate or highlight either action
 without replacing the full-screen background. Preserve hard pixel edges when
@@ -20,6 +22,9 @@ resizing: use nearest-neighbour sampling and never upscale a runtime asset.
 The versioned GIFs are non-destructive animation experiments. Their generated
 four-frame source sheets live in `source/`, and `tools/build_action_gifs.py`
 rebuilds the runtime files with a shared palette and transparent disposal.
+`tools/gif_to_argb8888.py` then predecodes each GIF to sequential BGRA byte
+frames. This avoids runtime GIF-decoder dependencies while retaining the GIF's
+authored frame timing and alpha channel.
 
 ## Art direction
 

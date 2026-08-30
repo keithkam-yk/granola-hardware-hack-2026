@@ -44,6 +44,8 @@
     {
       "id": "action-flap-animation-v1",
       "file": "runtime/flap_wings_animation_v1.gif",
+      "firmware_file": "runtime/flap_wings_animation_v1.argb8888",
+      "firmware_format": "LVGL ARGB8888, sequential BGRA frames",
       "width": 84,
       "height": 67,
       "frames": 4,
@@ -55,6 +57,8 @@
     {
       "id": "action-deuce-animation-v1",
       "file": "runtime/deuce_payload_animation_v1.gif",
+      "firmware_file": "runtime/deuce_payload_animation_v1.argb8888",
+      "firmware_format": "LVGL ARGB8888, sequential BGRA frames",
       "width": 56,
       "height": 84,
       "frames": 4,
