@@ -17,6 +17,14 @@ static link_line_cb_t s_on_line;
 static SemaphoreHandle_t s_lock;
 static int s_socket = -1;   // -1 means the line runs over USB
 
+// Samples go by datagram when one is available. TCP holds everything behind a
+// lost packet until it has been resent, which on a lossy link turns one drop
+// into a stall of hundreds of milliseconds — and a stale sample was worthless
+// anyway, so waiting for it costs the fresh ones for nothing. Anything that
+// must arrive, like a weapon change, still goes over the socket.
+static int s_datagram = -1;
+static struct sockaddr_in s_datagram_to;
+
 // One send() per sample is slower than the sample rate over wifi, and because
 // the sampling loop does the sending, the whole controller drops to whatever
 // the radio can manage: 200 Hz became 70. Lines are queued here instead and a
@@ -58,13 +66,26 @@ static void writer_task(void *arg)
         xSemaphoreTake(s_lock, portMAX_DELAY);
         size_t length = s_out_used;
         int fd = s_socket;
+        int datagram = s_datagram;
+        struct sockaddr_in to = s_datagram_to;
         if (length) {
             memcpy(batch, s_out, length);
             s_out_used = 0;
         }
         xSemaphoreGive(s_lock);
 
-        if (!length || fd < 0) continue;
+        if (!length) continue;
+
+        if (datagram >= 0) {
+            // A datagram that does not fit is a datagram nobody wanted; the
+            // next one is along in 40 ms with fresher numbers in it.
+            sendto(datagram, batch, length, 0,
+                   (struct sockaddr *)&to, sizeof(to));
+            vTaskDelay(pdMS_TO_TICKS(SEND_GAP_MS));
+            continue;
+        }
+
+        if (fd < 0) continue;
 
         // A wedged host must not back up the queue for ever. Dropping the
         // socket hands it to the reconnect loop and the line falls back to USB.
@@ -108,6 +129,21 @@ void link_deliver(const char *line)
     if (s_on_line) s_on_line(line);
 }
 
+void link_attach_datagram(int fd, const struct sockaddr_in *to)
+{
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    s_datagram = fd;
+    s_datagram_to = *to;
+    xSemaphoreGive(s_lock);
+}
+
+void link_detach_datagram(void)
+{
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    s_datagram = -1;
+    xSemaphoreGive(s_lock);
+}
+
 void link_attach_socket(int fd)
 {
     xSemaphoreTake(s_lock, portMAX_DELAY);
@@ -127,6 +163,7 @@ bool link_is_wireless(void)
     return s_socket >= 0;
 }
 
+// Reliable: goes over the socket, or straight out USB when there is none.
 void link_sendf(const char *fmt, ...)
 {
     char line[LINE_MAX];
@@ -139,7 +176,14 @@ void link_sendf(const char *fmt, ...)
     line[n++] = '\n';
 
     xSemaphoreTake(s_lock, portMAX_DELAY);
-    bool wireless = s_socket >= 0;
+    bool wireless = s_socket >= 0 && s_datagram < 0;
+    if (s_socket >= 0 && s_datagram >= 0) {
+        // Reliable traffic is rare, so it goes out on its own immediately
+        // rather than sharing the sample queue.
+        send(s_socket, line, n, 0);
+        xSemaphoreGive(s_lock);
+        return;
+    }
     if (wireless) {
         if (s_out_used + n <= OUT_MAX) {
             memcpy(s_out + s_out_used, line, n);

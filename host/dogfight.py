@@ -205,6 +205,25 @@ def serve_controllers(fleet, tcp_port):
         threading.Thread(target=read_socket, args=(sock, controller, fleet), daemon=True).start()
 
 
+def read_datagrams(fleet, udp_port):
+    """Samples arrive by datagram so one lost packet cannot hold up the rest.
+
+    A datagram carries whole lines and is matched to a controller by source
+    address, which is also the name it joined under."""
+    listener = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    listener.bind(("0.0.0.0", udp_port))
+    while True:
+        data, addr = listener.recvfrom(8192)
+        controller = next((c for c in fleet.snapshot() if c.name == addr[0]), None)
+        if not controller:
+            continue
+        for raw in data.split(b"\n"):
+            line = raw.decode("utf-8", "replace").strip()
+            if line:
+                controller.feed(line)
+
+
 def answer_discovery(tcp_port):
     """Boards broadcast for a host rather than storing an address that goes
     stale the next time DHCP moves things around."""
@@ -359,12 +378,15 @@ def main():
 
     threading.Thread(target=answer_discovery, args=(args.tcp_port,), daemon=True).start()
     threading.Thread(target=serve_controllers, args=(fleet, args.tcp_port), daemon=True).start()
+    threading.Thread(target=read_datagrams, args=(fleet, args.tcp_port + 1), daemon=True).start()
     threading.Thread(target=pump, args=(fleet, hub), daemon=True).start()
     if args.serial:
         threading.Thread(target=read_serial, args=(args.serial, fleet), daemon=True).start()
 
     url = f"http://{lan_address()}:{args.http_port}/"
-    print(f"# game at {url}\n# controllers welcome on tcp {args.tcp_port}", file=sys.stderr)
+    print(f"# game at {url}\n"
+          f"# controllers welcome on tcp {args.tcp_port}, samples on udp {args.tcp_port + 1}",
+          file=sys.stderr)
     if not args.no_browser:
         threading.Timer(0.7, lambda: webbrowser.open(url)).start()
 

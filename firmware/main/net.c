@@ -220,10 +220,20 @@ static void host_task(void *arg)
         struct timeval send_timeout = {.tv_sec = 2};
         setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &send_timeout, sizeof(send_timeout));
 
+        // Samples ride a datagram to the port beside the socket's.
+        struct sockaddr_in samples_to = host;
+        samples_to.sin_port = htons(port + 1);
+        int datagram = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+
         link_sendf("#net host " IPSTR ":%u", IP2STR((esp_ip4_addr_t *)&host.sin_addr), port);
         link_attach_socket(fd);
+        if (datagram >= 0) link_attach_datagram(datagram, &samples_to);
+
         pump(fd);
+
+        link_detach_datagram();
         link_detach_socket();
+        if (datagram >= 0) close(datagram);
         close(fd);
         link_sendf("#net host gone, looking again");
     }
@@ -316,6 +326,11 @@ esp_err_t net_start(void)
     // instead of a stream. It has to be set after the driver is started to
     // stick. A controller runs for one session, so the power is not worth it.
     ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_NONE));
+
+    // A narrower channel is more robust in congestion than a wider one, and
+    // this link carries a few KB/s, so there is no throughput to trade away.
+    esp_wifi_set_bandwidth(WIFI_IF_STA, WIFI_BW_HT20);
+    esp_wifi_set_max_tx_power(80);
     if (!have) link_sendf("#net no network stored; send: !wifi ssid=NAME pass=SECRET");
 
     return xTaskCreate(host_task, "net_host", 4096, NULL, 4, NULL) == pdPASS

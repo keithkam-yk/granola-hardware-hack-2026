@@ -8,6 +8,7 @@
 #include <stdbool.h>
 
 #include "esp_err.h"
+#include "lwip/sockets.h"
 
 // Called once per line received, newline stripped, on whichever task read it.
 typedef void (*link_line_cb_t)(const char *line);
@@ -23,6 +24,11 @@ void link_deliver(const char *line);
 // Routes traffic over a connected socket, or back to USB.
 void link_attach_socket(int fd);
 void link_detach_socket(void);
+
+// Best-effort channel for samples. While one is attached, samples take it and
+// anything that must arrive keeps using the socket.
+void link_attach_datagram(int fd, const struct sockaddr_in *to);
+void link_detach_datagram(void);
 bool link_is_wireless(void);
 
 // Lines the outgoing queue had to discard. A link that overflows quietly is a

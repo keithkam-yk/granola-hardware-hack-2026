@@ -98,6 +98,9 @@ identifies this one as V2, and the vendor BSP picks the right driver from it.
 Text, one message per line, both directions, so the transport can change without
 anything above it noticing. It already has: USB first, then wifi.
 
+Samples travel by UDP to the port beside the socket's; everything else, in both
+directions, goes over the socket.
+
 Up, at 50 Hz:
 
 ```
@@ -160,8 +163,8 @@ Measured, so that expectations match the hardware rather than the diagram.
 | | |
 | --- | --- |
 | Sample rate delivered | 50 Hz, no drops |
-| Typical gap | ~60 ms |
-| Stalls | 200-400 ms, a few times a minute |
+| Typical gap | ~20 ms |
+| Stalls | 150-350 ms, a few times a minute |
 | Reconnect after a host restart | ~1 s |
 
 The tail is the network, not the code: an ESP32 is 2.4 GHz only, and on a guest
@@ -171,7 +174,13 @@ recorded so nobody tries them twice: halving the sample rate, and quartering the
 number of transmissions. Both worked as designed and neither moved the stalls,
 because they are latency and not bandwidth.
 
-Two things that did:
+- **Samples by datagram instead of over the socket.** TCP holds everything
+  behind a lost packet until it has been resent, and a stale sample was
+  worthless anyway, so waiting for it cost the fresh ones for nothing. Halved
+  both the p99 gap and the number of stalls. Weapon changes still go over the
+  socket, because those must arrive.
+
+Two other things that did:
 
 - **Wifi modem power save off.** It parks the radio between beacons and turned a
   steady stream into bursts. It only takes effect after the driver is started.
