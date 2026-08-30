@@ -1,0 +1,385 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ESP32 Motion Lab</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #090d14;
+      --panel: rgba(18, 25, 38, 0.88);
+      --line: rgba(255, 255, 255, 0.09);
+      --muted: #8d9bad;
+      --text: #edf4ff;
+      --x: #ff5c7a;
+      --y: #5ee3a6;
+      --z: #66a7ff;
+      --accent: #8b7cff;
+      --good: #5ee3a6;
+      --warn: #f1b958;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background:
+        radial-gradient(circle at 12% -10%, rgba(102, 167, 255, .2), transparent 32rem),
+        radial-gradient(circle at 90% 5%, rgba(139, 124, 255, .16), transparent 28rem),
+        var(--bg);
+      color: var(--text);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    main { width: min(1420px, calc(100% - 32px)); margin: 0 auto; padding: 30px 0 42px; }
+    header { display: flex; align-items: flex-end; justify-content: space-between; gap: 24px; margin-bottom: 22px; }
+    .eyebrow { margin: 0 0 6px; color: #8fa5c2; font-size: 12px; font-weight: 750; letter-spacing: .18em; text-transform: uppercase; }
+    h1 { margin: 0; font-size: clamp(29px, 4vw, 48px); letter-spacing: -.04em; line-height: 1; }
+    .subtitle { margin: 9px 0 0; color: var(--muted); }
+    .status { display: flex; align-items: center; gap: 9px; color: var(--muted); font-size: 13px; max-width: 430px; text-align: right; }
+    .status-dot { width: 9px; height: 9px; border-radius: 50%; background: #f1b958; box-shadow: 0 0 16px currentColor; flex: 0 0 auto; }
+    .status.live .status-dot { background: #5ee3a6; }
+    .airmouse { display: grid; grid-template-columns: minmax(260px, 1.15fr) minmax(280px, 1fr); gap: 24px; padding: 18px 20px; margin-bottom: 14px; }
+    .airmouse-copy { display: flex; flex-direction: column; justify-content: center; }
+    .airmouse h2 { margin: 0 0 7px; font-size: 17px; }
+    .airmouse p { margin: 0; color: var(--muted); font-size: 13px; line-height: 1.5; }
+    .airmouse-state { display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0 0; }
+    .badge { display: inline-flex; align-items: center; gap: 7px; min-height: 30px; border: 1px solid var(--line); border-radius: 999px; padding: 5px 10px; color: var(--muted); background: rgba(255,255,255,.035); font-size: 11px; font-weight: 700; letter-spacing: .05em; text-transform: uppercase; }
+    .badge::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: #64748b; }
+    .badge.good { color: var(--text); border-color: rgba(94,227,166,.32); background: rgba(94,227,166,.08); }
+    .badge.good::before { background: var(--good); box-shadow: 0 0 12px rgba(94,227,166,.75); }
+    .badge.active { color: #fff; border-color: rgba(139,124,255,.55); background: rgba(139,124,255,.22); box-shadow: 0 0 22px rgba(139,124,255,.15); }
+    .badge.active::before { background: #b0a7ff; box-shadow: 0 0 14px rgba(176,167,255,.9); }
+    .sensitivity { display: grid; grid-template-columns: 1fr auto; align-content: center; gap: 8px 12px; border-left: 1px solid var(--line); padding-left: 24px; }
+    .sensitivity label { font-size: 12px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
+    .sensitivity output { color: var(--good); font: 700 13px ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .sensitivity input { grid-column: 1 / -1; width: 100%; accent-color: var(--accent); }
+    .sensitivity small { grid-column: 1 / -1; color: var(--muted); font-size: 11px; }
+    .pointer-demo { margin-bottom: 14px; }
+    .pointer-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 16px 18px; }
+    .pointer-heading h2 { margin: 0 0 5px; font-size: 17px; }
+    .pointer-heading p { margin: 0; color: var(--muted); font-size: 13px; }
+    .pointer-field {
+      position: relative; height: clamp(280px, 38vh, 410px); overflow: hidden; border-top: 1px solid var(--line);
+      background:
+        linear-gradient(rgba(255,255,255,.035) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(255,255,255,.035) 1px, transparent 1px),
+        radial-gradient(circle at center, rgba(102,167,255,.13), transparent 55%);
+      background-size: 34px 34px, 34px 34px, 100% 100%;
+      cursor: crosshair;
+    }
+    .pointer-field::before, .pointer-field::after { content: ""; position: absolute; background: rgba(255,255,255,.075); pointer-events: none; }
+    .pointer-field::before { left: 50%; top: 0; bottom: 0; width: 1px; }
+    .pointer-field::after { top: 50%; left: 0; right: 0; height: 1px; }
+    .pointer-field.active { box-shadow: inset 0 0 0 2px rgba(94,227,166,.55), inset 0 0 80px rgba(94,227,166,.07); }
+    .demo-cursor { position: absolute; left: 0; top: 0; width: 34px; height: 43px; z-index: 2; pointer-events: none; filter: drop-shadow(0 5px 9px rgba(0,0,0,.6)); will-change: transform; }
+    .demo-cursor svg { display: block; width: 100%; height: 100%; overflow: visible; }
+    .pointer-hint { position: absolute; left: 50%; bottom: 17px; z-index: 1; transform: translateX(-50%); border: 1px solid var(--line); border-radius: 999px; padding: 8px 13px; color: var(--muted); background: rgba(9,13,20,.78); font-size: 12px; white-space: nowrap; backdrop-filter: blur(10px); }
+    .pointer-field.active .pointer-hint { color: var(--good); border-color: rgba(94,227,166,.35); }
+    .toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-bottom: 14px; }
+    button, select {
+      border: 1px solid var(--line); border-radius: 10px; background: rgba(255,255,255,.055); color: var(--text);
+      padding: 9px 12px; font: inherit; font-size: 13px; cursor: pointer;
+    }
+    button:hover, select:hover { background: rgba(255,255,255,.09); }
+    .toolbar label { margin-left: 4px; color: var(--muted); font-size: 12px; }
+    .legend { display: flex; gap: 16px; margin-left: auto; color: var(--muted); font-size: 12px; }
+    .legend span::before { content: ""; display: inline-block; width: 8px; height: 8px; margin-right: 6px; border-radius: 50%; background: var(--color); }
+    .stats { display: grid; grid-template-columns: repeat(8, minmax(105px, 1fr)); gap: 10px; margin-bottom: 14px; }
+    .stat, .panel { border: 1px solid var(--line); background: var(--panel); box-shadow: 0 18px 60px rgba(0,0,0,.16); backdrop-filter: blur(15px); }
+    .stat { border-radius: 13px; padding: 13px 14px; min-height: 82px; }
+    .stat-label { color: var(--muted); font-size: 11px; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; }
+    .stat-value { margin-top: 9px; font-size: clamp(18px, 2vw, 25px); font-variant-numeric: tabular-nums; letter-spacing: -.03em; white-space: nowrap; }
+    .stat-value small { color: var(--muted); font-size: 10px; letter-spacing: 0; }
+    .charts { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+    .panel { border-radius: 16px; overflow: hidden; }
+    .panel-heading { display: flex; justify-content: space-between; align-items: baseline; padding: 16px 18px 0; }
+    .panel h2 { margin: 0; font-size: 15px; letter-spacing: -.01em; }
+    .panel-unit { color: var(--muted); font-size: 11px; }
+    canvas { display: block; width: 100%; height: 310px; }
+    .orientation { display: grid; grid-template-columns: 170px 1fr; align-items: center; gap: 22px; margin-top: 14px; padding: 18px; }
+    .tilt-field { position: relative; width: 140px; aspect-ratio: 1; margin: auto; border-radius: 50%; border: 1px solid var(--line); background: radial-gradient(circle, rgba(102,167,255,.12), transparent 65%); }
+    .tilt-field::before, .tilt-field::after { content: ""; position: absolute; background: var(--line); }
+    .tilt-field::before { left: 50%; top: 8%; bottom: 8%; width: 1px; }
+    .tilt-field::after { top: 50%; left: 8%; right: 8%; height: 1px; }
+    .tilt-dot { position: absolute; left: 50%; top: 50%; width: 20px; height: 20px; margin: -10px; border-radius: 50%; background: #edf4ff; box-shadow: 0 0 0 7px rgba(102,167,255,.16), 0 0 24px rgba(102,167,255,.7); transition: transform .05s linear; }
+    .orientation h2 { margin: 0 0 7px; }
+    .orientation p { margin: 0; color: var(--muted); line-height: 1.5; font-size: 13px; }
+    @media (max-width: 1050px) { .stats { grid-template-columns: repeat(4, 1fr); } .charts { grid-template-columns: 1fr; } }
+    @media (max-width: 650px) {
+      main { width: min(100% - 20px, 1420px); padding-top: 20px; }
+      header { align-items: flex-start; flex-direction: column; }
+      .status { text-align: left; }
+      .stats { grid-template-columns: repeat(2, 1fr); }
+      .legend { width: 100%; margin: 3px 0 0; }
+      .orientation { grid-template-columns: 1fr; text-align: center; }
+      .airmouse { grid-template-columns: 1fr; }
+      .sensitivity { border-left: 0; border-top: 1px solid var(--line); padding: 18px 0 0; }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <div>
+        <p class="eyebrow">QMI8658 · live telemetry</p>
+        <h1>ESP32 Motion Lab</h1>
+        <p class="subtitle">Accelerometer and gyroscope signals from the Waveshare ESP32-S3.</p>
+      </div>
+      <div class="status" id="status"><span class="status-dot"></span><span id="statusText">Connecting…</span></div>
+    </header>
+
+    <div class="toolbar">
+      <button id="pause">Pause</button>
+      <button id="clear">Clear history</button>
+      <label for="window">Window</label>
+      <select id="window"><option value="5">5 seconds</option><option value="10" selected>10 seconds</option><option value="20">20 seconds</option></select>
+      <label for="sampleEvery">Plot</label>
+      <select id="sampleEvery"><option value="1">Every sample</option><option value="2">Every 2nd</option><option value="5">Every 5th</option></select>
+      <div class="legend"><span style="--color:var(--x)">X</span><span style="--color:var(--y)">Y</span><span style="--color:var(--z)">Z</span></div>
+    </div>
+
+    <section class="panel airmouse" id="airmousePanel">
+      <div class="airmouse-copy">
+        <h2>Touch-clutched air mouse</h2>
+        <p>Pair <strong>QMI8658 Air Mouse</strong> in Bluetooth settings. Hold the board’s screen for 120 ms, then rotate your wrist to move. Lift to freeze and recenter. Taps never click.</p>
+        <div class="airmouse-state">
+          <span class="badge" id="bleBadge">BLE waiting</span>
+          <span class="badge" id="calBadge">Calibrating</span>
+          <span class="badge" id="touchBadge">Touch checking</span>
+          <span class="badge" id="clutchBadge">Clutch idle</span>
+        </div>
+      </div>
+      <div class="sensitivity">
+        <label for="sensitivity">Pointer sensitivity</label>
+        <output id="sensitivityValue">0.18</output>
+        <input id="sensitivity" type="range" min="0.05" max="0.80" step="0.01" value="0.18">
+        <small id="settingStatus">Applied over USB serial · lower is steadier, higher is faster</small>
+      </div>
+    </section>
+
+    <section class="panel pointer-demo">
+      <div class="pointer-heading">
+        <div><h2>Live pointer playground</h2><p>Hold the board’s touchscreen, then rotate the controller. No Bluetooth pairing required here.</p></div>
+        <button id="resetPointer">Center pointer</button>
+      </div>
+      <div class="pointer-field" id="pointerField">
+        <div class="demo-cursor" id="demoCursor" aria-hidden="true">
+          <svg viewBox="0 0 34 43"><path d="M3 2v31l8.2-7.1 6.1 13.4 6.7-3-6-13.1 11.1-.4L3 2Z" fill="#f7fbff" stroke="#090d14" stroke-width="2.4" stroke-linejoin="round"/></svg>
+        </div>
+        <div class="pointer-hint" id="pointerHint">Hold the touchscreen, then rotate</div>
+      </div>
+    </section>
+
+    <section class="stats">
+      <div class="stat"><div class="stat-label">Accel X</div><div class="stat-value" id="ax">—</div></div>
+      <div class="stat"><div class="stat-label">Accel Y</div><div class="stat-value" id="ay">—</div></div>
+      <div class="stat"><div class="stat-label">Accel Z</div><div class="stat-value" id="az">—</div></div>
+      <div class="stat"><div class="stat-label">Total accel</div><div class="stat-value" id="am">—</div></div>
+      <div class="stat"><div class="stat-label">Gyro X</div><div class="stat-value" id="gx">—</div></div>
+      <div class="stat"><div class="stat-label">Gyro Y</div><div class="stat-value" id="gy">—</div></div>
+      <div class="stat"><div class="stat-label">Gyro Z</div><div class="stat-value" id="gz">—</div></div>
+      <div class="stat"><div class="stat-label">Temperature</div><div class="stat-value" id="temp">—</div></div>
+    </section>
+
+    <section class="charts">
+      <article class="panel"><div class="panel-heading"><h2>Linear acceleration</h2><span class="panel-unit">m/s²</span></div><canvas id="accelChart"></canvas></article>
+      <article class="panel"><div class="panel-heading"><h2>Angular velocity</h2><span class="panel-unit">degrees / second</span></div><canvas id="gyroChart"></canvas></article>
+    </section>
+
+    <section class="panel orientation">
+      <div class="tilt-field"><div class="tilt-dot" id="tiltDot"></div></div>
+      <div><h2>Gravity tilt</h2><p>The dot follows the gravity vector from the accelerometer. Move slowly to see orientation; quick movements add linear acceleration, so the dot will briefly react to those too.</p></div>
+    </section>
+  </main>
+
+  <script>
+    const colors = ['#ff5c7a', '#5ee3a6', '#66a7ff'];
+    const history = [];
+    let paused = false;
+    let received = 0;
+    let latestAt = 0;
+    let serialStatus = 'Connecting…';
+    let pointerX = null;
+    let pointerY = null;
+
+    class TraceChart {
+      constructor(canvas, fields, minRange) {
+        this.canvas = canvas;
+        this.ctx = canvas.getContext('2d');
+        this.fields = fields;
+        this.minRange = minRange;
+      }
+      draw(samples) {
+        const dpr = window.devicePixelRatio || 1;
+        const rect = this.canvas.getBoundingClientRect();
+        const width = Math.max(1, Math.floor(rect.width));
+        const height = Math.max(1, Math.floor(rect.height));
+        if (this.canvas.width !== width * dpr || this.canvas.height !== height * dpr) {
+          this.canvas.width = width * dpr; this.canvas.height = height * dpr;
+          this.ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        }
+        const ctx = this.ctx;
+        ctx.clearRect(0, 0, width, height);
+        const pad = { left: 47, right: 16, top: 17, bottom: 27 };
+        const plotW = width - pad.left - pad.right;
+        const plotH = height - pad.top - pad.bottom;
+        const values = samples.flatMap(s => this.fields.map(f => Math.abs(s[f])));
+        const range = Math.max(this.minRange, ...values, 1) * 1.14;
+        ctx.font = '11px ui-monospace, SFMono-Regular, Menlo, monospace';
+        ctx.lineWidth = 1;
+        ctx.textAlign = 'right'; ctx.textBaseline = 'middle';
+        for (let i = 0; i <= 4; i++) {
+          const y = pad.top + plotH * i / 4;
+          const value = range - (2 * range * i / 4);
+          ctx.strokeStyle = i === 2 ? 'rgba(255,255,255,.13)' : 'rgba(255,255,255,.055)';
+          ctx.beginPath(); ctx.moveTo(pad.left, y); ctx.lineTo(width - pad.right, y); ctx.stroke();
+          ctx.fillStyle = '#718096'; ctx.fillText(value.toFixed(range < 20 ? 1 : 0), pad.left - 8, y);
+        }
+        if (samples.length < 2) return;
+        const t0 = samples[0].hostTime;
+        const t1 = samples[samples.length - 1].hostTime;
+        const span = Math.max(1, t1 - t0);
+        this.fields.forEach((field, fieldIndex) => {
+          ctx.strokeStyle = colors[fieldIndex]; ctx.lineWidth = 1.7; ctx.lineJoin = 'round';
+          ctx.beginPath();
+          samples.forEach((sample, index) => {
+            const x = pad.left + ((sample.hostTime - t0) / span) * plotW;
+            const y = pad.top + (range - sample[field]) / (2 * range) * plotH;
+            if (index === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+          });
+          ctx.stroke();
+        });
+        ctx.fillStyle = '#718096'; ctx.textAlign = 'left'; ctx.textBaseline = 'bottom';
+        ctx.fillText(`${((t1 - t0) / 1000).toFixed(1)} s`, pad.left, height - 6);
+      }
+    }
+
+    const accelChart = new TraceChart(document.querySelector('#accelChart'), ['ax','ay','az'], 12);
+    const gyroChart = new TraceChart(document.querySelector('#gyroChart'), ['gx','gy','gz'], 35);
+
+    function format(id, value, unit) {
+      document.querySelector(`#${id}`).innerHTML = `${value.toFixed(2)} <small>${unit}</small>`;
+    }
+    function updateReadouts(s) {
+      ['ax','ay','az'].forEach(k => format(k, s[k], 'm/s²'));
+      ['gx','gy','gz'].forEach(k => format(k, s[k], '°/s'));
+      format('am', Math.hypot(s.ax, s.ay, s.az), 'm/s²');
+      format('temp', s.temp, '°C');
+      const limit = 54;
+      const x = Math.max(-limit, Math.min(limit, s.ay * 5));
+      const y = Math.max(-limit, Math.min(limit, s.ax * 5));
+      document.querySelector('#tiltDot').style.transform = `translate(${x}px, ${y}px)`;
+    }
+
+    function updateAirMouse(state) {
+      const ble = document.querySelector('#bleBadge');
+      const calibrated = document.querySelector('#calBadge');
+      const touch = document.querySelector('#touchBadge');
+      const clutch = document.querySelector('#clutchBadge');
+      ble.textContent = state.ble === 'connected' ? 'BLE connected' : 'BLE advertising';
+      ble.className = `badge ${state.ble === 'connected' ? 'good' : ''}`;
+      calibrated.textContent = state.calibrated ? 'Gyro calibrated' : 'Keep board still';
+      calibrated.className = `badge ${state.calibrated ? 'good' : ''}`;
+      touch.textContent = state.touch ? 'Touch ready' : 'Touch unavailable';
+      touch.className = `badge ${state.touch ? 'good' : ''}`;
+      const clutchLabel = state.clutch === 'active' ? 'Clutch active' : state.clutch === 'arming' ? 'Hold…' : 'Clutch idle';
+      clutch.textContent = clutchLabel;
+      clutch.className = `badge ${state.clutch === 'active' ? 'active' : ''}`;
+      const pointerField = document.querySelector('#pointerField');
+      pointerField.classList.toggle('active', state.clutch === 'active');
+      document.querySelector('#pointerHint').textContent = state.clutch === 'active'
+        ? 'Moving — lift your finger to freeze'
+        : state.clutch === 'arming' ? 'Keep holding…' : 'Hold the touchscreen, then rotate';
+      if (Number.isFinite(state.sensitivity)) {
+        document.querySelector('#sensitivity').value = state.sensitivity;
+        document.querySelector('#sensitivityValue').value = Number(state.sensitivity).toFixed(2);
+      }
+    }
+
+    function drawPointer() {
+      const field = document.querySelector('#pointerField');
+      const cursor = document.querySelector('#demoCursor');
+      const rect = field.getBoundingClientRect();
+      if (pointerX === null || pointerY === null) {
+        pointerX = rect.width / 2;
+        pointerY = rect.height / 2;
+      }
+      pointerX = Math.max(3, Math.min(rect.width - 31, pointerX));
+      pointerY = Math.max(3, Math.min(rect.height - 40, pointerY));
+      cursor.style.transform = `translate(${pointerX}px, ${pointerY}px)`;
+      cursor.dataset.x = pointerX.toFixed(1);
+      cursor.dataset.y = pointerY.toFixed(1);
+    }
+
+    function movePointer(dx, dy) {
+      if (!Number.isFinite(dx) || !Number.isFinite(dy)) return;
+      drawPointer();
+      pointerX += dx;
+      pointerY += dy;
+      drawPointer();
+    }
+
+    function centerPointer() {
+      const rect = document.querySelector('#pointerField').getBoundingClientRect();
+      pointerX = rect.width / 2;
+      pointerY = rect.height / 2;
+      drawPointer();
+    }
+
+    const source = new EventSource('/events');
+    source.onmessage = event => {
+      const data = JSON.parse(event.data);
+      if (data.type === 'status') {
+        serialStatus = data.status;
+        document.querySelector('#statusText').textContent = serialStatus;
+        return;
+      }
+      if (data.type === 'airmouse') { updateAirMouse(data); return; }
+      if (data.type === 'cursor') { movePointer(Number(data.dx), Number(data.dy)); return; }
+      if (data.type !== 'sample') return;
+      latestAt = performance.now();
+      updateReadouts(data);
+      received += 1;
+      if (!paused && received % Number(document.querySelector('#sampleEvery').value) === 0) {
+        history.push({ ...data, hostTime: Date.now() });
+      }
+    };
+    source.onerror = () => { document.querySelector('#statusText').textContent = 'Dashboard stream reconnecting…'; };
+
+    document.querySelector('#pause').onclick = event => {
+      paused = !paused; event.target.textContent = paused ? 'Resume' : 'Pause';
+    };
+    document.querySelector('#clear').onclick = () => history.length = 0;
+    document.querySelector('#resetPointer').onclick = centerPointer;
+    window.addEventListener('resize', drawPointer);
+    const sensitivity = document.querySelector('#sensitivity');
+    sensitivity.oninput = () => { document.querySelector('#sensitivityValue').value = Number(sensitivity.value).toFixed(2); };
+    sensitivity.onchange = async () => {
+      const status = document.querySelector('#settingStatus');
+      status.textContent = 'Applying over USB serial…';
+      try {
+        const response = await fetch('/settings', {
+          method: 'POST', headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({sensitivity: Number(sensitivity.value)})
+        });
+        if (!response.ok) throw new Error(await response.text());
+        status.textContent = 'Applied over USB serial · lower is steadier, higher is faster';
+      } catch (error) {
+        status.textContent = 'Could not apply setting — check the USB connection';
+      }
+    };
+
+    function frame() {
+      const cutoff = Date.now() - Number(document.querySelector('#window').value) * 1000;
+      while (history.length && history[0].hostTime < cutoff) history.shift();
+      const live = performance.now() - latestAt < 1000;
+      document.querySelector('#status').classList.toggle('live', live);
+      document.querySelector('#statusText').textContent = live ? `Live · ${history.length} plotted samples` : serialStatus;
+      accelChart.draw(history); gyroChart.draw(history);
+      requestAnimationFrame(frame);
+    }
+    centerPointer();
+    requestAnimationFrame(frame);
+  </script>
+</body>
+</html>
