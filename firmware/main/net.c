@@ -24,6 +24,8 @@
 #define NVS_NAMESPACE   "dogfight"
 #define NVS_KEY_SSID    "ssid"
 #define NVS_KEY_PASS    "pass"
+#define NVS_KEY_HOST    "host"
+#define NVS_KEY_PORT    "hport"
 
 // The host answers a broadcast on this port with the TCP port to come back on.
 #define DISCOVERY_PORT  41234
@@ -33,6 +35,13 @@
 #define GOT_IP_BIT      BIT0
 
 static EventGroupHandle_t s_events;
+
+// A host that has been named explicitly. Broadcast discovery only reaches the
+// local link, and an access point that hands out more than one subnet — guest
+// networks routinely do — leaves the board and the laptop unable to shout at
+// each other even though they can route perfectly well.
+static char s_host[16];
+static uint16_t s_host_port;
 
 static void on_wifi_event(void *arg, esp_event_base_t base, int32_t id, void *data)
 {
@@ -105,17 +114,38 @@ static void pump(int fd)
     }
 }
 
+// Prefers an address that was given to us, and shouts for one otherwise.
+static bool find_host(struct sockaddr_in *host, uint16_t *port)
+{
+    if (s_host[0] != '\0') {
+        memset(host, 0, sizeof(*host));
+        host->sin_family = AF_INET;
+        host->sin_addr.s_addr = inet_addr(s_host);
+        *port = s_host_port;
+        if (host->sin_addr.s_addr != INADDR_NONE) return true;
+    }
+    return discover_host(host, port);
+}
+
 static void host_task(void *arg)
 {
+    int quiet_rounds = 0;
+
     while (1) {
         xEventGroupWaitBits(s_events, GOT_IP_BIT, pdFALSE, pdTRUE, portMAX_DELAY);
 
         struct sockaddr_in host;
         uint16_t port = 0;
-        if (!discover_host(&host, &port)) {
+        if (!find_host(&host, &port)) {
+            // Silence here reads as a dead board, so say something occasionally
+            // without turning the link into a log.
+            if (++quiet_rounds % 10 == 0) {
+                link_sendf("#net no host yet; send: !host ip=A.B.C.D");
+            }
             vTaskDelay(pdMS_TO_TICKS(1000));
             continue;
         }
+        quiet_rounds = 0;
         host.sin_port = htons(port);
 
         int fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
@@ -145,6 +175,21 @@ static void host_task(void *arg)
     }
 }
 
+void net_set_host(const char *ip, uint16_t port)
+{
+    snprintf(s_host, sizeof(s_host), "%s", ip);
+    s_host_port = port;
+
+    nvs_handle_t nvs;
+    if (nvs_open(NVS_NAMESPACE, NVS_READWRITE, &nvs) == ESP_OK) {
+        nvs_set_str(nvs, NVS_KEY_HOST, s_host);
+        nvs_set_u16(nvs, NVS_KEY_PORT, port);
+        nvs_commit(nvs);
+        nvs_close(nvs);
+    }
+    link_sendf("#net host set to %s:%u", s_host, port);
+}
+
 void net_set_credentials(const char *ssid, const char *password)
 {
     nvs_handle_t nvs;
@@ -169,6 +214,10 @@ static bool load_credentials(wifi_config_t *config)
 {
     nvs_handle_t nvs;
     if (nvs_open(NVS_NAMESPACE, NVS_READONLY, &nvs) != ESP_OK) return false;
+
+    size_t host_len = sizeof(s_host);
+    if (nvs_get_str(nvs, NVS_KEY_HOST, s_host, &host_len) != ESP_OK) s_host[0] = '\0';
+    if (nvs_get_u16(nvs, NVS_KEY_PORT, &s_host_port) != ESP_OK) s_host_port = 41235;
 
     size_t ssid_len = sizeof(config->sta.ssid);
     size_t pass_len = sizeof(config->sta.password);

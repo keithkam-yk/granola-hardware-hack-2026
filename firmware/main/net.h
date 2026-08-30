@@ -9,3 +9,7 @@ esp_err_t net_start(void);
 // Stores a network and joins it. The password is written to NVS and never
 // echoed back over the link.
 void net_set_credentials(const char *ssid, const char *password);
+
+// Names the host directly, for networks where a broadcast cannot reach it.
+// Stored in NVS and preferred over discovery.
+void net_set_host(const char *ip, uint16_t port);

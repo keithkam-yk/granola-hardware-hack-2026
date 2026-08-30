@@ -24,3 +24,7 @@ void link_deliver(const char *line);
 void link_attach_socket(int fd);
 void link_detach_socket(void);
 bool link_is_wireless(void);
+
+// Lines the outgoing queue had to discard. A link that overflows quietly is a
+// link that lies about its rate.
+uint32_t link_dropped(void);

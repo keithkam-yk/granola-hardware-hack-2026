@@ -34,13 +34,12 @@ static void assign(const char *key, const char *value)
     // before the firmware knows about them without bricking the panel.
 }
 
-// "!wifi ssid=NAME pass=SECRET". Neither value may contain a space, which is
-// the price of a one-line command typed at a serial port instead of a captive
-// portal nobody wants to build twice.
-static void set_wifi(const char *args)
+// "!host ip=A.B.C.D [port=41235]", for when a broadcast cannot reach the host.
+static void set_host(const char *args)
 {
-    char ssid[33] = {0}, password[65] = {0};
-    char buffer[160];
+    char ip[16] = {0};
+    int port = 41235;
+    char buffer[96];
     snprintf(buffer, sizeof(buffer), "%s", args);
 
     char *save = NULL;
@@ -48,15 +47,38 @@ static void set_wifi(const char *args)
         char *equals = strchr(token, '=');
         if (!equals) continue;
         *equals = '\0';
-        if (!strcmp(token, "ssid")) snprintf(ssid, sizeof(ssid), "%s", equals + 1);
-        else if (!strcmp(token, "pass")) snprintf(password, sizeof(password), "%s", equals + 1);
+        if (!strcmp(token, "ip")) snprintf(ip, sizeof(ip), "%s", equals + 1);
+        else if (!strcmp(token, "port")) port = atoi(equals + 1);
     }
 
-    if (ssid[0] == '\0') {
+    if (ip[0] == '\0') {
+        link_sendf("#net usage: !host ip=A.B.C.D [port=41235]");
+        return;
+    }
+    net_set_host(ip, (uint16_t)port);
+}
+
+// "!wifi ssid=NAME pass=SECRET". Networks are routinely named with spaces in
+// them, so the split is on the literal " pass=" rather than on whitespace; only
+// the password has to avoid containing that exact string.
+static void set_wifi(const char *args)
+{
+    const char *ssid_start = strstr(args, "ssid=");
+    const char *pass_start = strstr(args, " pass=");
+    if (!ssid_start) {
         link_sendf("#net usage: !wifi ssid=NAME pass=SECRET");
         return;
     }
-    net_set_credentials(ssid, password);
+    ssid_start += 5;
+
+    size_t length = pass_start && pass_start > ssid_start
+                    ? (size_t)(pass_start - ssid_start) : strlen(ssid_start);
+    char ssid[33];
+    if (length >= sizeof(ssid)) length = sizeof(ssid) - 1;
+    memcpy(ssid, ssid_start, length);
+    ssid[length] = '\0';
+
+    net_set_credentials(ssid, pass_start ? pass_start + 6 : "");
 }
 
 // "!hud hp=87 wl=40 gl=CANNON al=120 ..." — every field optional, so the host
@@ -65,6 +87,10 @@ static void host_said(const char *line)
 {
     if (strncmp(line, "!wifi ", 6) == 0) {
         set_wifi(line + 6);
+        return;
+    }
+    if (strncmp(line, "!host ", 6) == 0) {
+        set_host(line + 6);
         return;
     }
     if (strncmp(line, "!hud ", 5) != 0) return;

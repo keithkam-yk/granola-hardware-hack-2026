@@ -46,9 +46,11 @@
 #define ACC_SCALE_G    (8.0f / 32768.0f)
 #define GYR_SCALE_DPS  (2048.0f / 32768.0f)
 
-// 200 Hz is far more than a plane needs and leaves the panel its bus time. The
-// rate travels in the banner, so raising it costs the host nothing.
-#define SAMPLE_HZ      200
+// 100 Hz. A plane does not need more, and 200 Hz did not survive a guest wifi
+// network: the outgoing queue overflowed and the link delivered 117 Hz while
+// claiming 200, which is worse than asking for less and getting all of it. The
+// rate travels in the banner, so raising it later costs the host nothing.
+#define SAMPLE_HZ      100
 
 // The PMU only has to be asked often enough that a trigger never feels late.
 #define PMU_EVERY_N    2
@@ -157,8 +159,8 @@ static void controller_task(void *arg)
         // Re-announce the wire contract periodically so a host that attaches to
         // an already-running board still learns the scale factors.
         if (seq % (SAMPLE_HZ * 2) == 0) {
-            link_sendf("#DOGFIGHT v3 imu=QMI8658 rate_hz=%d acc_scale_g=%.9f gyr_scale_dps=%.9f",
-                       SAMPLE_HZ, ACC_SCALE_G, GYR_SCALE_DPS);
+            link_sendf("#DOGFIGHT v3 imu=QMI8658 rate_hz=%d acc_scale_g=%.9f gyr_scale_dps=%.9f link_dropped=%lu",
+                       SAMPLE_HZ, ACC_SCALE_G, GYR_SCALE_DPS, (unsigned long)link_dropped());
             link_sendf("#cols seq,t_us,ax,ay,az,gx,gy,gz,btn_l,btn_r");
         }
 

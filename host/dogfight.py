@@ -26,6 +26,7 @@ DISCOVERY_ASK = b"DOGFIGHT?"
 DISCOVERY_REPLY = "DOGFIGHT {port}"
 
 FLUSH_INTERVAL = 1 / 60          # one display frame's worth of samples per event
+SILENCE_TIMEOUT = 3              # seconds without a sample before a board is gone
 SAMPLE_COLUMNS = 10              # seq,t_us,ax,ay,az,gx,gy,gz,btn_l,btn_r
 
 
@@ -187,6 +188,10 @@ def serve_controllers(fleet, tcp_port):
     while True:
         sock, addr = listener.accept()
         sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        # A board that reboots leaves its old socket half-open, and the reader
+        # would sit in recv for ever holding a phantom player. Controllers
+        # stream continuously, so silence this long means gone.
+        sock.settimeout(SILENCE_TIMEOUT)
         controller = Controller(f"{addr[0]}", sock.sendall)
         threading.Thread(target=read_socket, args=(sock, controller, fleet), daemon=True).start()
 
