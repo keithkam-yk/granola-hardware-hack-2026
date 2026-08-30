@@ -103,6 +103,12 @@ function attitude(sample, frame) {
 // and stops the needles twitching between packets.
 const smooth = (previous, next) => previous + (next - previous) * 0.25;
 
+// A frame measured earlier is the normal case, so a reload flies rather than
+// asking for five poses again. Saved on the host, not in this browser, so the
+// game views read the same one.
+let saved = null;
+fetch('/calibration').then(r => r.json()).then(frame => { saved = frame; }).catch(() => {});
+
 const cards = new Map();
 
 function card(name) {
@@ -136,7 +142,7 @@ function card(name) {
     rollValue: root.querySelector('[data-roll-v]'),
     pitchValue: root.querySelector('[data-pitch-v]'),
     index: cards.size,
-    poses: {}, at: 0, frame: null, roll: 0, pitch: 0, recent: [],
+    poses: {}, at: 0, frame: saved, roll: 0, pitch: 0, recent: [],
   };
 
   entry.restart = () => { entry.poses = {}; entry.at = 0; entry.frame = null; };
@@ -188,7 +194,10 @@ new EventSource('/stream').onmessage = function (event) {
       view.poses[POSES[view.at].key] =
         [median(view.recent, 2), median(view.recent, 3), median(view.recent, 4)];
       view.at += 1;
-      if (view.at === POSES.length) view.frame = frameFrom(view.poses);
+      if (view.at === POSES.length) {
+        view.frame = frameFrom(view.poses);
+        fetch('/calibration', { method: 'POST', body: JSON.stringify(view.frame) });
+      }
     }
     view.boot = boot;
     view.bothHeld = bothHeld;

@@ -22,6 +22,10 @@ from pathlib import Path
 
 HERE = Path(__file__).parent
 
+# Where the stick's measured axis frame lives. Every view reads it, so the
+# calibration is done once for the board rather than once per page.
+CALIBRATION = HERE / "calibration.json"
+
 DISCOVERY_PORT = 41234
 DISCOVERY_ASK = b"DOGFIGHT?"
 DISCOVERY_REPLY = "DOGFIGHT {port}"
@@ -263,6 +267,9 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path.startswith("/stream"):
             return self.serve_stream()
+        if self.path.startswith("/calibration"):
+            body = CALIBRATION.read_bytes() if CALIBRATION.is_file() else b"null"
+            return self.send_json(body)
 
         # "/" is the link check; "/2d" serves proto-2d.html and so on, so a view
         # is reachable the moment its file exists without touching this file.
@@ -281,15 +288,30 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_POST(self):
-        """The game pushes each player's panel state back to their board."""
+        """Panel state going back to a board, or a freshly measured stick frame."""
         length = int(self.headers.get("Content-Length", 0))
-        payload = json.loads(self.rfile.read(length) or b"{}")
+        raw = self.rfile.read(length) or b"{}"
+
+        if self.path.startswith("/calibration"):
+            CALIBRATION.write_bytes(raw)
+            print(f"# calibration saved to {CALIBRATION.name}", file=sys.stderr)
+            return self.send_json(b"{}")
+
+        payload = json.loads(raw)
         controller = self.fleet.get(int(payload.pop("player", 0)))
         if controller:
             controller.send_hud(payload)
         self.send_response(200 if controller else 404)
         self.send_header("Content-Length", "0")
         self.end_headers()
+
+    def send_json(self, body):
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
 
     def serve_stream(self):
         self.send_response(200)
