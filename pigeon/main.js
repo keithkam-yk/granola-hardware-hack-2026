@@ -156,7 +156,7 @@ const bird = buildBird();
 scene.add(bird.group);
 
 /* ---- droppings ------------------------------------------------------------ */
-// BOOT drops one. It keeps the bird's momentum at release and only then falls
+// PWR drops one. It keeps the bird's momentum at release and only then falls
 // behind, which is what makes leading the shot feel like anything at all.
 
 const droppings = [];
@@ -265,15 +265,14 @@ function headingVector() {
 
 /* ---- the board ------------------------------------------------------------ */
 // The ESP32 controller, over the host's Server-Sent Events stream. Tilt steers,
-// PWR beats the wings, BOOT drops one.
+// BOOT beats the wings, PWR drops one, matching the artwork on the panel.
 //
 // Attitude is measured against a stored reference pose, not against a fixed
 // axis frame. Deriving which device axis points up from how the panel is
 // rotated was wrong twice in this project — the second time inverted, which is
 // what made roll snap between +180 and -180. Held in the flying position the
-// IMU reads ax = -0.88, so screen-up is -ax; that is only the default, and
-// pressing BOOT-and-holding, or C on the keyboard, replaces it with wherever
-// the board actually is. Working from a reference also kills the wrap: both
+// default pose comes from the controller's calibration.json, and C on the
+// keyboard replaces it with wherever the board actually is. Working from a reference also kills the wrap: both
 // angles come out of asin about that pose, so level reads zero and nothing
 // crosses a discontinuity short of 90 degrees, which no pigeon reaches.
 
@@ -348,8 +347,8 @@ function connectBoard() {
       // Rising edges only: the firmware sends levels, and one press has to mean
       // one beat however long a thumb stays down.
       const left = sample[8] | 0, right = sample[9] | 0;
-      if (right && !board.level[1]) beat();
-      if (left && !board.level[0]) drop();
+      if (left && !board.level[0]) beat();
+      if (right && !board.level[1]) drop();
       board.level = [left, right];
       board.last = sample;
     }
