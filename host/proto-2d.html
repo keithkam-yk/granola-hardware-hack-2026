@@ -1,4 +1,17 @@
 <!doctype html>
+<!--
+  Direction A: one shared 2D view of both planes, as if looking up at the fight.
+
+  Run it with no hardware:
+      cd host && python3 -m http.server 8765
+      open http://localhost:8765/proto-2d.html
+  (Or open the file directly -- everything here is self-contained.)
+
+  With a board attached it reads /stream from the game host and takes over from
+  the keyboard automatically. It accepts both the two-player {players:[...]}
+  envelope and the single-player {h,dropped,s} envelope host/dogfight.py
+  currently inherits from magic-wand.
+-->
 <meta charset="utf-8">
 <title>Dogfight — Direction A (one screen, 2D)</title>
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -330,11 +343,14 @@ const PALETTE = [
 ];
 
 let planes = [], bullets = [], missiles = [], puffs = [], scores = [0,0];
+// Declared here rather than with the renderer: reset() runs at load and has to
+// be able to tell the camera to snap rather than ease in from a stale zoom.
+const cam = { x: 0, y: 0, z: 0.7, placed: false };
 let over = null, overAt = 0;
 
 function makePlane(i) {
   return {
-    i, x: i === 0 ? -1250 : 1250, y: i === 0 ? 700 : -700,
+    i, x: i === 0 ? -760 : 760, y: i === 0 ? 430 : -430,
     heading: i === 0 ? -0.5 : Math.PI - 0.5,
     speed: 300, alt: i === 0 ? 0.35 : 0.65,
     bank: 0, hull: 100, wingL: 100, wingR: 100,
@@ -349,6 +365,7 @@ function makePlane(i) {
 function reset() {
   planes = [makePlane(0), makePlane(1)];
   bullets = []; missiles = []; puffs = []; over = null;
+  cam.placed = false;
 }
 reset();
 
@@ -447,7 +464,7 @@ function botStick(p, other, dt) {
   if (p.frustration > 3.5) {
     // Bound the extend. One shared camera has to hold both planes, so a bot that
     // runs to the far wall shrinks the whole fight to two specks.
-    if (p.frustration > 6.5 || dist > 1500) p.frustration = 0;
+    if (p.frustration > 5.5 || dist > 1100) p.frustration = 0;
     const away = Math.atan2(p.y - other.y, p.x - other.x);
     return { bank: Math.max(-1, Math.min(1, wrapAngle(away - p.heading)*2.0)), climb: 1 };
   }
@@ -514,7 +531,7 @@ function simulate(dt) {
 
     // Wingtip contrails. Bank squashes the span, so the two ribbons pinch
     // together through a hard turn, which is most of the sense of roll.
-    const span = 20 * Math.cos(p.bank * 1.1);
+    const span = 34 * Math.cos(p.bank * 1.1);
     const nx = -Math.sin(p.heading), ny = Math.cos(p.heading);
     p.trailL.push([p.x + nx*span, p.y + ny*span, p.alt]);
     p.trailR.push([p.x - nx*span, p.y - ny*span, p.alt]);
@@ -553,7 +570,7 @@ function simulate(dt) {
     let u = ((t.x-px)*sx + (t.y-py)*sy) / len2;
     u = Math.max(0, Math.min(1, u));
     const cx = px + sx*u, cy = py + sy*u;
-    if (Math.hypot(t.x-cx, t.y-cy) < 30 && Math.abs(t.alt - bl.alt) < TUNE.altTolerance) {
+    if (Math.hypot(t.x-cx, t.y-cy) < 38 && Math.abs(t.alt - bl.alt) < TUNE.altTolerance) {
       damage(t, TUNE.cannonDamage, bl.x, bl.y);
       bl.life = 0;
     }
@@ -575,7 +592,7 @@ function simulate(dt) {
     m.y += Math.sin(m.heading)*m.speed*dt;
     m.smoke.push([m.x, m.y]);
     if (m.smoke.length > 55) m.smoke.shift();
-    if (!t.dead && Math.hypot(t.x-m.x, t.y-m.y) < 46 && Math.abs(t.alt-m.alt) < 0.5) {
+    if (!t.dead && Math.hypot(t.x-m.x, t.y-m.y) < 60 && Math.abs(t.alt-m.alt) < 0.5) {
       damage(t, TUNE.missileDamage, m.x, m.y);
       for (let k=0;k<18;k++) puffs.push({ x: m.x, y: m.y, alt: m.alt, r: 4+Math.random()*12, life: .9,
                                           vx:(Math.random()-.5)*300, vy:(Math.random()-.5)*300, c:"255,190,90" });
@@ -617,15 +634,23 @@ const clouds = Array.from({length: 90}, () => ({
   a: 0.05 + rnd()*0.12,
 }));
 
-const cam = { x: 0, y: 0, z: 0.7 };
-
 function camUpdate(dt) {
   const [a,b] = planes;
-  const mx = (a.x+b.x)/2, my = (a.y+b.y)/2;
-  const spread = Math.max(Math.abs(a.x-b.x)/ (cv.width/DPR), Math.abs(a.y-b.y)/ (cv.height/DPR));
-  const want = Math.max(0.30, Math.min(1.25, 0.95 / Math.max(0.55, spread*1.5)));
-  const k = 1 - Math.exp(-dt/0.35);
-  cam.x = lerp(cam.x, mx, k); cam.y = lerp(cam.y, my, k); cam.z = lerp(cam.z, want, k);
+  const w = cv.width/DPR, h = cv.height/DPR;
+  // A literal fit: the zoom that puts both planes inside the frame with a
+  // margin, capped so a close fight does not blow up to absurd scale. Anything
+  // looser and the pair simply walks out of shot, which is the single failure
+  // mode a shared camera cannot afford.
+  const MARGIN = 620;
+  const want = Math.max(0.26, Math.min(1.15,
+    Math.min(w / (Math.abs(a.x-b.x) + MARGIN), h / (Math.abs(a.y-b.y) + MARGIN))));
+  // Snap on the first frame after a reset; easing in from a default zoom left
+  // both planes outside the frame for the opening seconds.
+  const k = cam.placed ? 1 - Math.exp(-dt/0.35) : 1;
+  cam.placed = true;
+  cam.x = lerp(cam.x, (a.x+b.x)/2, k);
+  cam.y = lerp(cam.y, (a.y+b.y)/2, k);
+  cam.z = lerp(cam.z, want, k);
 }
 
 function toScreen(x, y, alt) {
@@ -681,7 +706,11 @@ function drawTrail(pts, colour, alt) {
   }
 }
 
-/** Top-down fighter silhouette, one unit = one world unit at cam.z === 1. */
+/**
+ * Top-down fighter silhouette. Drawn at SILHOUETTE times world scale: at the
+ * zoom that fits both planes a to-scale fighter is about a dozen pixels, and
+ * this view's whole argument is that it stays readable from across a room.
+ */
 function planePath(bank, wingL, wingR) {
   // A hard bank hides the span, but never all of it: below about a third
   // the shape stops reading as an aircraft from across the room.
@@ -710,7 +739,8 @@ function planePath(bank, wingL, wingR) {
 function drawPlane(p) {
   if (p.dead) return;
   const [x,y] = toScreen(p.x, p.y, p.alt);
-  const scale = cam.z * lerp(0.90, 1.30, p.alt);
+  const SILHOUETTE = 1.7;   // drawn larger than life; see comment above drawPlane
+  const scale = cam.z * SILHOUETTE * lerp(0.90, 1.30, p.alt);
   ctx.save();
   ctx.translate(x,y); ctx.rotate(p.heading); ctx.scale(scale, scale);
 
@@ -889,8 +919,10 @@ function drawOffscreenMarker(p) {
   if (x > pad && x < w-pad && y > pad && y < h-pad) return;
   const cx = w/2, cy = h/2;
   const a = Math.atan2(y-cy, x-cx);
-  const mx = Math.max(pad, Math.min(w-pad, cx + Math.cos(a)*w));
-  const my = Math.max(pad, Math.min(h-pad, cy + Math.sin(a)*h));
+  // Walk out from the centre until the ray leaves the padded box, so the chevron
+  // sits on the edge the plane actually went out through.
+  const t = Math.min((cx-pad)/Math.abs(Math.cos(a) || 1e-6), (cy-pad)/Math.abs(Math.sin(a) || 1e-6));
+  const mx = cx + Math.cos(a)*t, my = cy + Math.sin(a)*t;
   ctx.save();
   ctx.translate(mx, my); ctx.rotate(a);
   ctx.fillStyle = PALETTE[p.i].key;

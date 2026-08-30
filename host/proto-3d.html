@@ -1,4 +1,19 @@
 <!doctype html>
+<!--
+  Direction B: split-screen third-person chase cam over a procedural London.
+
+  Run it with no hardware:
+      cd host && python3 -m http.server 8765
+      open http://localhost:8765/proto-3d.html
+  (Or open the file directly -- everything here is self-contained.)
+
+  Hand-rolled WebGL1, nothing vendored: the scene is one flat-shaded fogged
+  shader over a few thousand boxes, which needs neither a scene graph nor a
+  material system, and the repo stays dependency-free.
+
+  With a board attached it reads /stream from the game host and takes over from
+  the keyboard automatically.
+-->
 <meta charset="utf-8">
 <title>Dogfight — Direction B (split screen, 3D)</title>
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -564,6 +579,11 @@ const PALETTE = [
 
 let planes = [], bullets = [], missiles = [], sparks = [], scores = [0,0], over = null, overAt = 0;
 
+// Declared here rather than with the renderer: reset() runs at load and has to
+// be able to tell each chase cam to snap rather than ease in from the origin.
+const cams = [ { eye: [0,0,0], at: [0,0,0], up: [0,1,0], placed: false },
+               { eye: [0,0,0], at: [0,0,0], up: [0,1,0], placed: false } ];
+
 function makePlane(i) {
   const heading = i === 0 ? 0.3 : Math.PI - 0.3;
   return {
@@ -580,7 +600,7 @@ function makePlane(i) {
   };
 }
 function reset() { planes = [makePlane(0), makePlane(1)]; bullets = []; missiles = []; sparks = []; over = null;
-                   if (typeof cams !== "undefined") for (const c of cams) c.placed = false; }
+                   for (const c of cams) c.placed = false; }
 reset();
 
 const right = p => v3.norm(v3.cross(p.fwd, p.up));
@@ -812,8 +832,6 @@ function resize() {
 addEventListener("resize", resize); resize();
 
 const proj = mat4(), view = mat4(), model = mat4();
-const cams = [ { eye: [0,0,0], at: [0,0,0], up: [0,1,0], placed: false },
-               { eye: [0,0,0], at: [0,0,0], up: [0,1,0], placed: false } ];
 
 function updateCamera(i, dt) {
   const p = planes[i], c = cams[i];

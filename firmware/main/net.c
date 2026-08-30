@@ -5,6 +5,8 @@
 // be configured, because a broadcast on the local network answers that question
 // better than a stored address that goes stale the next time DHCP moves things
 // around.
+#include <errno.h>
+#include <fcntl.h>
 #include <string.h>
 
 #include "esp_event.h"
@@ -97,10 +99,24 @@ static void pump(int fd)
     char pending[256];
     size_t used = 0;
 
+    // The host speaks rarely, so a quiet socket is normal and a read timeout
+    // cannot mean "gone". It exists only so this loop wakes up often enough to
+    // notice the writer having dropped the socket after a failed send —
+    // otherwise the board sits in recv for ever and never reconnects.
+    struct timeval read_timeout = {.tv_sec = 1};
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &read_timeout, sizeof(read_timeout));
+
     while (1) {
         char chunk[256];
         int n = recv(fd, chunk, sizeof(chunk), 0);
-        if (n <= 0) return;
+        if (n == 0) return;
+        if (n < 0) {
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                if (!link_is_wireless()) return;
+                continue;
+            }
+            return;
+        }
 
         for (int i = 0; i < n; i++) {
             if (chunk[i] == '\n' || used == sizeof(pending) - 1) {
@@ -127,6 +143,49 @@ static bool find_host(struct sockaddr_in *host, uint16_t *port)
     return discover_host(host, port);
 }
 
+// lwip's blocking connect gives up on its own schedule, which is tens of
+// seconds: a board took 56 s to come back after the host restarted. Bounded
+// here instead, so a controller rejoins a game in about a second.
+#define CONNECT_TIMEOUT_MS 1500
+
+static int connect_to(struct sockaddr_in *host)
+{
+    int fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (fd < 0) return -1;
+
+    int flags = fcntl(fd, F_GETFL, 0);
+    fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+
+    int rc = connect(fd, (struct sockaddr *)host, sizeof(*host));
+    if (rc != 0) {
+        if (errno != EINPROGRESS) {
+            close(fd);
+            return -1;
+        }
+        fd_set writable;
+        FD_ZERO(&writable);
+        FD_SET(fd, &writable);
+        struct timeval timeout = {
+            .tv_sec = CONNECT_TIMEOUT_MS / 1000,
+            .tv_usec = (CONNECT_TIMEOUT_MS % 1000) * 1000,
+        };
+        if (select(fd + 1, NULL, &writable, NULL, &timeout) <= 0) {
+            close(fd);
+            return -1;
+        }
+        int error = 0;
+        socklen_t length = sizeof(error);
+        getsockopt(fd, SOL_SOCKET, SO_ERROR, &error, &length);
+        if (error != 0) {
+            close(fd);
+            return -1;
+        }
+    }
+
+    fcntl(fd, F_SETFL, flags);   // reads and writes stay blocking
+    return fd;
+}
+
 static void host_task(void *arg)
 {
     int quiet_rounds = 0;
@@ -148,14 +207,9 @@ static void host_task(void *arg)
         quiet_rounds = 0;
         host.sin_port = htons(port);
 
-        int fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+        int fd = connect_to(&host);
         if (fd < 0) {
-            vTaskDelay(pdMS_TO_TICKS(1000));
-            continue;
-        }
-        if (connect(fd, (struct sockaddr *)&host, sizeof(host)) != 0) {
-            close(fd);
-            vTaskDelay(pdMS_TO_TICKS(1000));
+            vTaskDelay(pdMS_TO_TICKS(500));
             continue;
         }
 
