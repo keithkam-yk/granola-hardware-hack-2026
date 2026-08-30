@@ -160,7 +160,10 @@ scene.add(bird.group);
 // behind, which is what makes leading the shot feel like anything at all.
 
 const droppings = [];
-const dropGeometry = new SphereGeometry(0.035, 8, 6);
+// A pigeon is 17cm across the body, so 7cm of dropping read as a laid egg.
+// Squashed slightly flat as well, since a sphere at any size reads as an egg.
+const dropGeometry = new SphereGeometry(0.012, 8, 6);
+dropGeometry.scale(1, 0.7, 1);
 const dropMaterial = new MeshStandardMaterial({ color: 0xf2f0e6, roughness: 0.9 });
 
 function drop() {
