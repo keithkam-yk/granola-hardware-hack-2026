@@ -138,9 +138,9 @@ const feather = (color, extra = {}) =>
 /** A body of revolution: deep chest, a waist, then a narrowing tail root. */
 function bodyGeometry() {
   const profile = [
-    [0.000, -0.150], [0.052, -0.130], [0.079, -0.075], [0.090, -0.010],
-    [0.086,  0.055], [0.070,  0.112], [0.046,  0.152], [0.026,  0.180],
-    [0.016,  0.196], [0.000,  0.205],
+    [0.000, -0.155], [0.030, -0.140], [0.050, -0.095], [0.063, -0.030],
+    [0.066,  0.030], [0.058,  0.090], [0.042,  0.140], [0.025,  0.175],
+    [0.015,  0.195], [0.000,  0.205],
   ].map(([radius, along]) => new Vector2(radius, along));
   const geometry = new LatheGeometry(profile, 24);
   geometry.rotateZ(-Math.PI / 2);   // the lathe runs up Y; the bird runs along X
@@ -175,7 +175,9 @@ function tailGeometry() {
 function buildBird() {
   const g = new Group();
 
-  g.add(new Mesh(bodyGeometry(), feather(PLUMAGE.slate)));
+  const torso = new Mesh(bodyGeometry(), feather(PLUMAGE.slate));
+  torso.scale.z = 0.86;   // deeper than wide, like a breast rather than a barrel
+  g.add(torso);
 
   const neck = new Mesh(new SphereGeometry(0.054, 20, 14),
                         feather(PLUMAGE.iris, { roughness: 0.55, metalness: 0.25 }));
@@ -210,28 +212,25 @@ function buildBird() {
     eye.position.set(0.224, 0.102, side * 0.035);
     g.add(eye);
 
-    const foot = new Mesh(new CylinderGeometry(0.005, 0.005, 0.050, 6), feather(PLUMAGE.foot, { roughness: 0.6 }));
-    foot.position.set(0.020, -0.115, side * 0.026);
+    // Tucked up under the belly rather than dangling: slimming the torso left
+    // the legs hanging in clear air below it.
+    const foot = new Mesh(new CylinderGeometry(0.005, 0.005, 0.042, 6), feather(PLUMAGE.foot, { roughness: 0.6 }));
+    foot.position.set(0.020, -0.076, side * 0.024);
+    foot.rotation.z = -0.35;
     g.add(foot);
 
     const pivot = new Group();
-    pivot.position.set(0.010, 0.045, side * 0.038);
+    pivot.position.set(0.010, 0.050, side * 0.045);
     g.add(pivot);
 
     const wing = new Mesh(wingGeometry(), feather(PLUMAGE.slate, { side: DoubleSide }));
     wing.scale.z = side;
     pivot.add(wing);
 
-    // A rock dove's two dark wing bars want to be a texture. Faked as slim
-    // slabs lying flush along the trailing edge instead — anything with the
-    // wing's own outline reads as a fin bolted on rather than as a marking.
-    for (const [chord, span] of [[-0.038, 0.86], [-0.056, 0.66]]) {
-      const bar = new Mesh(new CylinderGeometry(0.005, 0.005, 0.30, 4), feather(PLUMAGE.dark));
-      bar.rotation.x = Math.PI / 2;
-      bar.scale.set(1, span, 0.55);
-      bar.position.set(chord, 0.002, side * 0.16);
-      pivot.add(bar);
-    }
+    // No wing bars. Tried twice: as scaled copies of the planform they read as
+    // a second pair of wings, as rods they ran through the body and out the
+    // far side. The marking wants to be a texture, and at chase distance the
+    // silhouette is doing the work regardless.
     wings.push({ pivot, side });
   }
   return { group: g, wings };
