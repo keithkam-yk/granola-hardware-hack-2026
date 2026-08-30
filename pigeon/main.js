@@ -13,7 +13,8 @@
 import {
   Scene, PerspectiveCamera, WebGLRenderer, Group, Vector3, Vector2, Quaternion,
   Matrix4, Euler, DirectionalLight, AmbientLight, MathUtils, Fog, Color,
-  Mesh, MeshStandardMaterial, SphereGeometry, BoxGeometry, ConeGeometry, Raycaster,
+  Mesh, MeshStandardMaterial, SphereGeometry, ConeGeometry, CylinderGeometry,
+  LatheGeometry, ExtrudeGeometry, Shape, DoubleSide, Raycaster,
 } from 'three';
 import { TilesRenderer, WGS84_ELLIPSOID } from '3d-tiles-renderer';
 import { GoogleCloudAuthPlugin, GLTFExtensionsPlugin, TileCompressionPlugin } from '3d-tiles-renderer/plugins';
@@ -111,42 +112,126 @@ sun.position.set(0.5, 1, 0.3);
 scene.add(sun);
 
 /* ---- the bird ------------------------------------------------------------- */
-// A stand-in, deliberately: enough of a silhouette to read attitude and heading
-// against the city, cheap enough to replace the moment a real model turns up.
+// A feral rock dove at life size: 33cm bill to tail, 66cm across the wings.
+// Built rather than downloaded — every photoreal pigeon worth having sits
+// behind a login, and the free ones on offer turned out to be a seagull, a
+// crow, a mallard and an egret. At chase-camera distance the silhouette and
+// the wingbeat carry it, so the shapes are cut carefully and the surfaces are
+// left as flat PBR colours rather than textures.
+//
+// Nose is +X and the wings span Z, which is the frame the flight code already
+// turns the bird in.
+
+const PLUMAGE = {
+  slate: 0x77808c,   // body grey, on the blue side of neutral
+  dark: 0x4a515b,    // primaries, the two wing bars, the tail band
+  iris: 0x4c6f60,    // the neck's green shot, faked as a flat colour
+  bill: 0x3a3a40,
+  cere: 0xf2f0ee,    // the white saddle over the bill
+  foot: 0xc4564b,
+  eye: 0xd8a13c,
+};
+
+const feather = (color, extra = {}) =>
+  new MeshStandardMaterial({ color, roughness: 0.72, metalness: 0.06, ...extra });
+
+/** A body of revolution: deep chest, a waist, then a narrowing tail root. */
+function bodyGeometry() {
+  const profile = [
+    [0.000, -0.150], [0.052, -0.130], [0.079, -0.075], [0.090, -0.010],
+    [0.086,  0.055], [0.070,  0.112], [0.046,  0.152], [0.026,  0.180],
+    [0.016,  0.196], [0.000,  0.205],
+  ].map(([radius, along]) => new Vector2(radius, along));
+  const geometry = new LatheGeometry(profile, 24);
+  geometry.rotateZ(-Math.PI / 2);   // the lathe runs up Y; the bird runs along X
+  return geometry;
+}
+
+/** One wing in plan: swept leading edge, raked tip, tapered trailing edge. */
+function wingGeometry() {
+  const shape = new Shape();
+  shape.moveTo(0.070, 0);
+  shape.bezierCurveTo(0.080, 0.10, 0.058, 0.22, 0.020, 0.320);   // leading edge
+  shape.lineTo(-0.010, 0.335);                                    // the tip
+  shape.bezierCurveTo(-0.045, 0.23, -0.062, 0.12, -0.065, 0);     // trailing edge
+  shape.lineTo(0.070, 0);
+  const geometry = new ExtrudeGeometry(shape, { depth: 0.006, bevelEnabled: false });
+  geometry.rotateX(-Math.PI / 2);   // lay the planform flat, span along +Z
+  return geometry;
+}
+
+/** The tail fan: a flat wedge that widens away from the body. */
+function tailGeometry() {
+  const shape = new Shape();
+  shape.moveTo(0, -0.030);
+  shape.lineTo(-0.150, -0.072);
+  shape.lineTo(-0.150, 0.072);
+  shape.lineTo(0, 0.030);
+  const geometry = new ExtrudeGeometry(shape, { depth: 0.005, bevelEnabled: false });
+  geometry.rotateX(-Math.PI / 2);
+  return geometry;
+}
 
 function buildBird() {
   const g = new Group();
-  const body = new Mesh(new SphereGeometry(0.085, 16, 12),
-                        new MeshStandardMaterial({ color: 0x5b6472, roughness: 0.85 }));
-  body.scale.set(1.9, 0.95, 0.8);
-  g.add(body);
 
-  const head = new Mesh(new SphereGeometry(0.048, 14, 10),
-                        new MeshStandardMaterial({ color: 0x49586b, roughness: 0.8 }));
-  head.position.set(0.15, 0.042, 0);
+  g.add(new Mesh(bodyGeometry(), feather(PLUMAGE.slate)));
+
+  const neck = new Mesh(new SphereGeometry(0.054, 20, 14),
+                        feather(PLUMAGE.iris, { roughness: 0.55, metalness: 0.25 }));
+  neck.position.set(0.150, 0.058, 0);
+  neck.scale.set(1.25, 0.98, 0.95);
+  g.add(neck);
+
+  const head = new Mesh(new SphereGeometry(0.049, 20, 14), feather(PLUMAGE.slate));
+  head.position.set(0.200, 0.092, 0);
+  head.scale.set(1.06, 0.98, 1);
   g.add(head);
 
-  const beak = new Mesh(new ConeGeometry(0.014, 0.05, 8),
-                        new MeshStandardMaterial({ color: 0xd9a066, roughness: 0.6 }));
-  beak.position.set(0.20, 0.032, 0);
-  beak.rotation.z = -Math.PI/2;
-  g.add(beak);
+  const cere = new Mesh(new SphereGeometry(0.014, 10, 8), feather(PLUMAGE.cere, { roughness: 0.9 }));
+  cere.position.set(0.246, 0.086, 0);
+  cere.scale.set(0.9, 1.15, 1);
+  g.add(cere);
 
-  const tail = new Mesh(new BoxGeometry(0.12, 0.009, 0.09),
-                        new MeshStandardMaterial({ color: 0x3e4654, roughness: 0.9 }));
-  tail.position.set(-0.19, 0.009, 0);
+  const bill = new Mesh(new ConeGeometry(0.011, 0.046, 10), feather(PLUMAGE.bill, { roughness: 0.5 }));
+  bill.rotation.z = -Math.PI / 2;
+  bill.position.set(0.264, 0.088, 0);
+  g.add(bill);
+
+  const tail = new Mesh(tailGeometry(), feather(PLUMAGE.dark, { side: DoubleSide }));
+  tail.position.set(-0.150, 0.012, 0);
   g.add(tail);
 
   // Wings pivot at the shoulder, so a beat is a rotation of the pivot rather
   // than anything animated into the geometry.
   const wings = [];
   for (const side of [1, -1]) {
+    const eye = new Mesh(new SphereGeometry(0.0085, 10, 8), feather(PLUMAGE.eye, { roughness: 0.25 }));
+    eye.position.set(0.224, 0.102, side * 0.035);
+    g.add(eye);
+
+    const foot = new Mesh(new CylinderGeometry(0.005, 0.005, 0.050, 6), feather(PLUMAGE.foot, { roughness: 0.6 }));
+    foot.position.set(0.020, -0.115, side * 0.026);
+    g.add(foot);
+
     const pivot = new Group();
-    const wing = new Mesh(new BoxGeometry(0.15, 0.008, 0.29),
-                          new MeshStandardMaterial({ color: 0x66707e, roughness: 0.85 }));
-    wing.position.set(-0.018, 0, side * 0.17);
-    pivot.add(wing);
+    pivot.position.set(0.010, 0.045, side * 0.038);
     g.add(pivot);
+
+    const wing = new Mesh(wingGeometry(), feather(PLUMAGE.slate, { side: DoubleSide }));
+    wing.scale.z = side;
+    pivot.add(wing);
+
+    // A rock dove's two dark wing bars want to be a texture. Faked as slim
+    // slabs lying flush along the trailing edge instead — anything with the
+    // wing's own outline reads as a fin bolted on rather than as a marking.
+    for (const [chord, span] of [[-0.038, 0.86], [-0.056, 0.66]]) {
+      const bar = new Mesh(new CylinderGeometry(0.005, 0.005, 0.30, 4), feather(PLUMAGE.dark));
+      bar.rotation.x = Math.PI / 2;
+      bar.scale.set(1, span, 0.55);
+      bar.position.set(chord, 0.002, side * 0.16);
+      pivot.add(bar);
+    }
     wings.push({ pivot, side });
   }
   return { group: g, wings };
@@ -593,7 +678,7 @@ function update(dt) {
   // dihedral, where a coasting pigeon actually holds them.
   const stroke = state.stroke < 1 ? Math.sin(state.stroke * Math.PI) : 0;
   for (const { pivot, side } of bird.wings) {
-    pivot.rotation.x = side * (0.14 - stroke * 1.55);
+    pivot.rotation.x = side * (stroke * 1.55 - 0.10);
   }
 
   // Chase camera, lagged. It looks where the pointer looks, not where the bird
