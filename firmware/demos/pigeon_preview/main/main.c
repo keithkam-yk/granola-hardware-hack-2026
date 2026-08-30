@@ -178,7 +178,6 @@ static bool init_action_animation(action_animation_t *animation, const uint8_t *
         return false;
     }
 
-    const uint16_t *background = (const uint16_t *)pigeon_screen_start;
     for (uint32_t index = 0; index < ACTION_FRAME_COUNT; ++index) {
         const uint8_t *source = data + index * source_frame_size;
         uint16_t *destination = display_frames + index * SCREEN_WIDTH * SCREEN_HEIGHT;
@@ -188,7 +187,7 @@ static bool init_action_animation(action_animation_t *animation, const uint8_t *
                 const uint32_t source_x = x * width / SCREEN_WIDTH;
                 const uint8_t *pixel = source + (source_y * width + source_x) * 4;
                 if (pixel[3] < 128) {
-                    destination[y * SCREEN_WIDTH + x] = background[y * SCREEN_WIDTH + x];
+                    destination[y * SCREEN_WIDTH + x] = 0;
                 } else {
                     const uint16_t red = pixel[2] >> 3;
                     const uint16_t green = pixel[1] >> 2;

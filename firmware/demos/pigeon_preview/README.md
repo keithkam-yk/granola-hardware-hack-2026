@@ -9,8 +9,9 @@ ESP32-S3 Touch AMOLED 1.8. It does not share source files with the main firmware
 The action widgets use predecoded ARGB8888 frame bundles generated from the
 versioned runtime GIFs. At startup, the firmware composes nearest-neighbour
 full-screen RGB565 frames in PSRAM so playback fills the 448x368 display without
-the cost of scaling and alpha blending every refresh. The original GIF and
-static PNG assets remain available as design sources and fallbacks.
+the cost of scaling and alpha blending every refresh. Transparent source pixels
+are rendered as solid black during either action. The original GIF and static
+PNG assets remain available as design sources and fallbacks.
 
 Build and flash from this directory:
 
