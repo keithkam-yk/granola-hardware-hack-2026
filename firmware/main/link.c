@@ -24,6 +24,9 @@ static int s_socket = -1;   // -1 means the line runs over USB
 // accumulates while a send is in flight goes out as one packet. Latency stays
 // low when idle because the writer is woken per line, not on a timer.
 #define OUT_MAX 4096
+
+// Minimum spacing between transmissions, which sets how much each one carries.
+#define SEND_GAP_MS 40
 static char s_out[OUT_MAX];
 static size_t s_out_used;
 static uint32_t s_dropped;
@@ -65,7 +68,18 @@ static void writer_task(void *arg)
 
         // A wedged host must not back up the queue for ever. Dropping the
         // socket hands it to the reconnect loop and the line falls back to USB.
-        if (send(fd, batch, length, 0) < 0) link_detach_socket();
+        if (send(fd, batch, length, 0) < 0) {
+            link_detach_socket();
+            continue;
+        }
+
+        // What a congested channel charges for is packets, not bytes: each one
+        // contends for airtime and may be retried. Holding off briefly after a
+        // send makes the next one carry everything that piled up meanwhile, so
+        // the stick costs a quarter of the transmissions it used to. The delay
+        // is answering a link whose round trip is already hundreds of
+        // milliseconds, so it is not what anyone will feel.
+        vTaskDelay(pdMS_TO_TICKS(SEND_GAP_MS));
     }
 }
 

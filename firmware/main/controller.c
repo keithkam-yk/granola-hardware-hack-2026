@@ -46,11 +46,11 @@
 #define ACC_SCALE_G    (8.0f / 32768.0f)
 #define GYR_SCALE_DPS  (2048.0f / 32768.0f)
 
-// 100 Hz. A plane does not need more, and 200 Hz did not survive a guest wifi
-// network: the outgoing queue overflowed and the link delivered 117 Hz while
-// claiming 200, which is worse than asking for less and getting all of it. The
+// 50 Hz. A wrist cannot produce anything a plane needs faster than this, and
+// the display runs its own clock and eases between readings, so resolution here
+// buys nothing that airtime on a busy 2.4 GHz channel does not cost more. The
 // rate travels in the banner, so raising it later costs the host nothing.
-#define SAMPLE_HZ      100
+#define SAMPLE_HZ      50
 
 // The PMU only has to be asked often enough that a trigger never feels late.
 #define PMU_EVERY_N    2
