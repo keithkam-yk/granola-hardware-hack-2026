@@ -7,12 +7,16 @@
 #include <string.h>
 
 #include "driver/i2c_master.h"
+#include "driver/gpio.h"
 #include "bsp/esp-bsp.h"
+#include "bsp/display.h"
+#include "bsp/touch.h"
 #include "esp_bt.h"
 #include "esp_err.h"
 #include "esp_event.h"
 #include "esp_hidd.h"
 #include "esp_hid_common.h"
+#include "esp_lvgl_port.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
@@ -33,8 +37,6 @@
 #define QMI8658_CTRL1_VALUE 0x60
 #define QMI8658_RESET_DELAY_MS 20
 
-#define TOUCH_HOLD_MS 120
-
 #define GYRO_CALIBRATION_SAMPLES 100
 #define GYRO_CALIBRATION_STILL_DPS 8.0f
 #define GYRO_DEAD_ZONE_DPS 1.5f
@@ -42,6 +44,21 @@
 #define DEFAULT_SENSITIVITY 0.18f
 #define MIN_SENSITIVITY 0.05f
 #define MAX_SENSITIVITY 0.80f
+#define FLIGHT_ALTITUDE_MIN_M 120
+#define FLIGHT_ALTITUDE_MAX_M 2400
+#define FLIGHT_ALTITUDE_INITIAL_M 840
+#define BOOT_BUTTON_GPIO GPIO_NUM_0
+#define BUTTON_DEBOUNCE_SAMPLES 2
+#define AXP2101_I2C_ADDRESS 0x34
+#define AXP2101_INTEN2_REGISTER 0x41
+#define AXP2101_INTSTS2_REGISTER 0x49
+#define AXP2101_PKEY_SHORT_IRQ 0x08
+#define AXP2101_PKEY_LONG_IRQ 0x04
+#define PWR_EVENT_PULSE_MS 300
+#define I2C_TIMEOUT_MS 100
+#define DISPLAY_BUFFER_LINES 100
+#define ORIENTATION_COMPLEMENTARY_ALPHA 0.98f
+#define ORIENTATION_EMIT_PERIOD_MS 40
 
 #define HID_BATTERY_LEVEL 100
 #define BLE_HID_SERVICE_UUID 0x1812
@@ -51,25 +68,115 @@ static esp_hidd_dev_t *s_hid_device;
 static volatile bool s_ble_connected;
 static volatile bool s_touch_available;
 static volatile bool s_calibrated;
-static volatile bool s_clutch_arming;
-static volatile bool s_clutch_active;
-static volatile bool s_touch_held;
+static volatile bool s_pwr_pressed;
+static volatile bool s_boot_pressed;
 static volatile float s_sensitivity = DEFAULT_SENSITIVITY;
+static volatile int s_flight_altitude_m = FLIGHT_ALTITUDE_INITIAL_M;
 static float s_gyro_bias[3];
 static uint32_t s_mouse_reports;
 static lv_obj_t *s_status_label;
+static lv_obj_t *s_altitude_label;
+static lv_obj_t *s_altitude_bar;
+static lv_obj_t *s_calibration_overlay;
+static lv_obj_t *s_calibration_step_label;
+static lv_obj_t *s_calibration_prompt_label;
+static lv_obj_t *s_calibration_values_label;
+static i2c_master_dev_handle_t s_axp2101;
+static lv_indev_t *s_display_input;
 
 typedef enum {
-    CONTROL_NONE = 0,
-    CONTROL_MOVE,
-    CONTROL_LASER,
-} control_mode_t;
+    ORIENTATION_CAL_GYRO = 0,
+    ORIENTATION_CAL_CENTER,
+    ORIENTATION_CAL_PITCH_FORWARD,
+    ORIENTATION_CAL_PITCH_BACK,
+    ORIENTATION_CAL_ROLL_RIGHT,
+    ORIENTATION_CAL_ROLL_LEFT,
+    ORIENTATION_CAL_YAW_CENTER,
+    ORIENTATION_CAL_YAW_RIGHT,
+    ORIENTATION_CAL_YAW_RETURN_CENTER,
+    ORIENTATION_CAL_YAW_LEFT,
+    ORIENTATION_CAL_DONE,
+} orientation_cal_step_t;
 
-static volatile control_mode_t s_control_mode;
+typedef struct {
+    float pitch_center;
+    float pitch_forward;
+    float pitch_back;
+    float roll_center;
+    float roll_right;
+    float roll_left;
+    float yaw_right;
+    float yaw_left;
+} orientation_calibration_t;
 
-static const char *control_mode_name(control_mode_t mode)
+static volatile orientation_cal_step_t s_orientation_cal_step = ORIENTATION_CAL_GYRO;
+static volatile bool s_orientation_initialized;
+static volatile float s_roll_deg;
+static volatile float s_pitch_deg;
+static volatile float s_yaw_deg;
+static volatile float s_roll_normalized;
+static volatile float s_pitch_normalized;
+static volatile float s_yaw_normalized;
+static volatile bool s_orientation_capture_rejected;
+static orientation_calibration_t s_orientation_calibration;
+
+static const char *control_mode_name(void)
 {
-    return mode == CONTROL_LASER ? "laser" : (mode == CONTROL_MOVE ? "move" : "none");
+    if (s_pwr_pressed && s_boot_pressed) {
+        return "both";
+    }
+    return s_boot_pressed ? "boot" : (s_pwr_pressed ? "pwr" : "none");
+}
+
+static const char *orientation_step_name(orientation_cal_step_t step)
+{
+    switch (step) {
+    case ORIENTATION_CAL_CENTER: return "1 / 9  CENTER";
+    case ORIENTATION_CAL_PITCH_FORWARD: return "2 / 9  PITCH FORWARD";
+    case ORIENTATION_CAL_PITCH_BACK: return "3 / 9  PITCH BACK";
+    case ORIENTATION_CAL_ROLL_RIGHT: return "4 / 9  ROLL RIGHT";
+    case ORIENTATION_CAL_ROLL_LEFT: return "5 / 9  ROLL LEFT";
+    case ORIENTATION_CAL_YAW_CENTER: return "6 / 9  CENTER YAW";
+    case ORIENTATION_CAL_YAW_RIGHT: return "7 / 9  YAW RIGHT";
+    case ORIENTATION_CAL_YAW_RETURN_CENTER: return "8 / 9  RETURN CENTER";
+    case ORIENTATION_CAL_YAW_LEFT: return "9 / 9  YAW LEFT";
+    case ORIENTATION_CAL_DONE: return "CALIBRATED";
+    default: return "GYRO CALIBRATION";
+    }
+}
+
+static const char *orientation_step_prompt(orientation_cal_step_t step)
+{
+    switch (step) {
+    case ORIENTATION_CAL_CENTER: return "Hold naturally and level";
+    case ORIENTATION_CAL_PITCH_FORWARD: return "Pitch fully forward";
+    case ORIENTATION_CAL_PITCH_BACK: return "Pitch fully backward";
+    case ORIENTATION_CAL_ROLL_RIGHT: return "Roll fully right";
+    case ORIENTATION_CAL_ROLL_LEFT: return "Roll fully left";
+    case ORIENTATION_CAL_YAW_CENTER: return "Return to center";
+    case ORIENTATION_CAL_YAW_RIGHT: return "Turn fully right";
+    case ORIENTATION_CAL_YAW_RETURN_CENTER: return "Return to center";
+    case ORIENTATION_CAL_YAW_LEFT: return "Turn fully left";
+    case ORIENTATION_CAL_DONE: return "Roll, pitch and yaw are live";
+    default: return "Keep the controller still";
+    }
+}
+
+static const char *orientation_step_key(orientation_cal_step_t step)
+{
+    switch (step) {
+    case ORIENTATION_CAL_CENTER: return "center";
+    case ORIENTATION_CAL_PITCH_FORWARD: return "pitch_forward";
+    case ORIENTATION_CAL_PITCH_BACK: return "pitch_back";
+    case ORIENTATION_CAL_ROLL_RIGHT: return "roll_right";
+    case ORIENTATION_CAL_ROLL_LEFT: return "roll_left";
+    case ORIENTATION_CAL_YAW_CENTER: return "yaw_center";
+    case ORIENTATION_CAL_YAW_RIGHT: return "yaw_right";
+    case ORIENTATION_CAL_YAW_RETURN_CENTER: return "yaw_return_center";
+    case ORIENTATION_CAL_YAW_LEFT: return "yaw_left";
+    case ORIENTATION_CAL_DONE: return "done";
+    default: return "gyro";
+    }
 }
 
 static const uint8_t s_mouse_report_map[] = {
@@ -100,90 +207,355 @@ static esp_hid_device_config_t s_hid_config = {
 
 static void emit_airmouse_state(void)
 {
-    const char *clutch = s_clutch_active ? "active" : (s_clutch_arming ? "arming" : "idle");
     printf(
-        "{\"type\":\"airmouse\",\"ble\":\"%s\",\"clutch\":\"%s\""
-        ",\"mode\":\"%s\",\"calibrated\":%s,\"touch\":%s,\"sensitivity\":%.3f"
-        ",\"bias\":[%.4f,%.4f,%.4f],\"reports\":%" PRIu32 "}\n",
-        s_ble_connected ? "connected" : "advertising", clutch,
-        control_mode_name(s_control_mode),
+        "{\"type\":\"airmouse\",\"ble\":\"%s\",\"tracking\":%s"
+        ",\"clutch\":\"%s\",\"mode\":\"%s\",\"pwr\":%s,\"boot\":%s"
+        ",\"calibrated\":%s,\"touch\":%s,\"sensitivity\":%.3f"
+        ",\"altitude\":%d,\"bias\":[%.4f,%.4f,%.4f],\"reports\":%" PRIu32 "}\n",
+        s_ble_connected ? "connected" : "advertising", s_calibrated ? "true" : "false",
+        s_calibrated ? "active" : "arming", control_mode_name(),
+        s_pwr_pressed ? "true" : "false", s_boot_pressed ? "true" : "false",
         s_calibrated ? "true" : "false", s_touch_available ? "true" : "false",
-        (double)s_sensitivity, (double)s_gyro_bias[0], (double)s_gyro_bias[1],
+        (double)s_sensitivity, s_flight_altitude_m,
+        (double)s_gyro_bias[0], (double)s_gyro_bias[1],
         (double)s_gyro_bias[2], s_mouse_reports);
     fflush(stdout);
 }
 
-static void control_button_event(lv_event_t *event)
+static float wrap_degrees(float angle)
 {
-    const lv_event_code_t code = lv_event_get_code(event);
-    const control_mode_t mode = (control_mode_t)(intptr_t)lv_event_get_user_data(event);
-    if (code == LV_EVENT_PRESSED) {
-        s_control_mode = mode;
-        s_touch_held = true;
-        emit_airmouse_state();
-    } else if (code == LV_EVENT_RELEASED || code == LV_EVENT_PRESS_LOST) {
-        s_touch_held = false;
-        s_control_mode = CONTROL_NONE;
-        emit_airmouse_state();
+    while (angle > 180.0f) {
+        angle -= 360.0f;
+    }
+    while (angle < -180.0f) {
+        angle += 360.0f;
+    }
+    return angle;
+}
+
+static float angle_from_center(float angle, float center)
+{
+    return wrap_degrees(angle - center);
+}
+
+static float normalize_orientation_axis(float angle, float center,
+                                        float positive_endpoint, float negative_endpoint)
+{
+    const float value = angle_from_center(angle, center);
+    const float positive = angle_from_center(positive_endpoint, center);
+    const float negative = angle_from_center(negative_endpoint, center);
+    float normalized = 0.0f;
+    if (value * positive >= 0.0f && fabsf(positive) >= 1.0f) {
+        normalized = value / positive;
+    } else if (fabsf(negative) >= 1.0f) {
+        normalized = -(value / negative);
+    }
+    return fmaxf(-1.0f, fminf(1.0f, normalized));
+}
+
+static void update_orientation(const qmi8658_data_t *data, float dt_seconds)
+{
+    const float accel_pitch = atan2f(-data->accelY, -data->accelZ) * 57.2957795f;
+    const float accel_roll = atan2f(data->accelX, -data->accelZ) * 57.2957795f;
+    if (!s_orientation_initialized) {
+        s_pitch_deg = accel_pitch;
+        s_roll_deg = accel_roll;
+        s_yaw_deg = 0.0f;
+        s_orientation_initialized = true;
+    } else {
+        const float predicted_pitch = wrap_degrees(
+            s_pitch_deg + (data->gyroX - s_gyro_bias[0]) * dt_seconds);
+        const float predicted_roll = wrap_degrees(
+            s_roll_deg + (data->gyroY - s_gyro_bias[1]) * dt_seconds);
+        s_pitch_deg = wrap_degrees(predicted_pitch +
+            (1.0f - ORIENTATION_COMPLEMENTARY_ALPHA) *
+            angle_from_center(accel_pitch, predicted_pitch));
+        s_roll_deg = wrap_degrees(predicted_roll +
+            (1.0f - ORIENTATION_COMPLEMENTARY_ALPHA) *
+            angle_from_center(accel_roll, predicted_roll));
+        s_yaw_deg = wrap_degrees(
+            s_yaw_deg + (data->gyroZ - s_gyro_bias[2]) * dt_seconds);
+    }
+
+    if (s_orientation_cal_step == ORIENTATION_CAL_DONE) {
+        s_pitch_normalized = normalize_orientation_axis(
+            s_pitch_deg, s_orientation_calibration.pitch_center,
+            s_orientation_calibration.pitch_forward,
+            s_orientation_calibration.pitch_back);
+        s_roll_normalized = normalize_orientation_axis(
+            s_roll_deg, s_orientation_calibration.roll_center,
+            s_orientation_calibration.roll_right,
+            s_orientation_calibration.roll_left);
+        s_yaw_normalized = normalize_orientation_axis(
+            s_yaw_deg, 0.0f, s_orientation_calibration.yaw_right,
+            s_orientation_calibration.yaw_left);
     }
 }
 
-static lv_obj_t *create_control_button(lv_obj_t *parent, control_mode_t mode,
-                                       const char *title, const char *subtitle,
-                                       lv_color_t color)
+static bool orientation_endpoint_is_valid(float value, float center)
 {
-    lv_obj_t *button = lv_button_create(parent);
-    lv_obj_set_size(button, 324, 126);
-    lv_obj_set_style_radius(button, 20, 0);
-    lv_obj_set_style_bg_color(button, lv_color_hex(0x24202D), 0);
-    lv_obj_set_style_bg_opa(button, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_width(button, 3, 0);
-    lv_obj_set_style_border_color(button, color, 0);
-    lv_obj_set_style_shadow_width(button, 0, 0);
-    lv_obj_set_style_bg_color(button, color, LV_STATE_PRESSED);
-    lv_obj_clear_flag(button, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_add_event_cb(button, control_button_event, LV_EVENT_ALL, (void *)(intptr_t)mode);
+    return fabsf(angle_from_center(value, center)) >= 12.0f;
+}
 
-    lv_obj_t *title_label = lv_label_create(button);
+static bool orientation_endpoints_are_opposed(float first, float second, float center)
+{
+    return angle_from_center(first, center) * angle_from_center(second, center) < 0.0f;
+}
+
+static void capture_orientation_calibration(void)
+{
+    orientation_cal_step_t next = s_orientation_cal_step;
+    bool accepted = true;
+    switch (s_orientation_cal_step) {
+    case ORIENTATION_CAL_CENTER:
+        s_orientation_calibration.pitch_center = s_pitch_deg;
+        s_orientation_calibration.roll_center = s_roll_deg;
+        s_yaw_deg = 0.0f;
+        next = ORIENTATION_CAL_PITCH_FORWARD;
+        break;
+    case ORIENTATION_CAL_PITCH_FORWARD:
+        accepted = orientation_endpoint_is_valid(
+            s_pitch_deg, s_orientation_calibration.pitch_center);
+        if (accepted) {
+            s_orientation_calibration.pitch_forward = s_pitch_deg;
+            next = ORIENTATION_CAL_PITCH_BACK;
+        }
+        break;
+    case ORIENTATION_CAL_PITCH_BACK:
+        accepted = orientation_endpoint_is_valid(
+            s_pitch_deg, s_orientation_calibration.pitch_center) &&
+            orientation_endpoints_are_opposed(
+                s_orientation_calibration.pitch_forward, s_pitch_deg,
+                s_orientation_calibration.pitch_center);
+        if (accepted) {
+            s_orientation_calibration.pitch_back = s_pitch_deg;
+            next = ORIENTATION_CAL_ROLL_RIGHT;
+        }
+        break;
+    case ORIENTATION_CAL_ROLL_RIGHT:
+        accepted = orientation_endpoint_is_valid(
+            s_roll_deg, s_orientation_calibration.roll_center);
+        if (accepted) {
+            s_orientation_calibration.roll_right = s_roll_deg;
+            next = ORIENTATION_CAL_ROLL_LEFT;
+        }
+        break;
+    case ORIENTATION_CAL_ROLL_LEFT:
+        accepted = orientation_endpoint_is_valid(
+            s_roll_deg, s_orientation_calibration.roll_center) &&
+            orientation_endpoints_are_opposed(
+                s_orientation_calibration.roll_right, s_roll_deg,
+                s_orientation_calibration.roll_center);
+        if (accepted) {
+            s_orientation_calibration.roll_left = s_roll_deg;
+            next = ORIENTATION_CAL_YAW_CENTER;
+        }
+        break;
+    case ORIENTATION_CAL_YAW_CENTER:
+        s_yaw_deg = 0.0f;
+        next = ORIENTATION_CAL_YAW_RIGHT;
+        break;
+    case ORIENTATION_CAL_YAW_RIGHT:
+        accepted = orientation_endpoint_is_valid(s_yaw_deg, 0.0f);
+        if (accepted) {
+            s_orientation_calibration.yaw_right = s_yaw_deg;
+            next = ORIENTATION_CAL_YAW_RETURN_CENTER;
+        }
+        break;
+    case ORIENTATION_CAL_YAW_RETURN_CENTER:
+        s_yaw_deg = 0.0f;
+        next = ORIENTATION_CAL_YAW_LEFT;
+        break;
+    case ORIENTATION_CAL_YAW_LEFT:
+        accepted = orientation_endpoint_is_valid(s_yaw_deg, 0.0f) &&
+            orientation_endpoints_are_opposed(
+                s_orientation_calibration.yaw_right, s_yaw_deg, 0.0f);
+        if (accepted) {
+            s_orientation_calibration.yaw_left = s_yaw_deg;
+            next = ORIENTATION_CAL_DONE;
+        }
+        break;
+    default:
+        accepted = false;
+        break;
+    }
+    s_orientation_capture_rejected = !accepted;
+    if (accepted) {
+        s_orientation_cal_step = next;
+        ESP_LOGI(TAG, "Orientation calibration: %s", orientation_step_key(next));
+    }
+}
+
+static void emit_orientation(void)
+{
+    printf(
+        "{\"type\":\"orientation\",\"step\":\"%s\",\"calibrated\":%s"
+        ",\"roll\":%.2f,\"pitch\":%.2f,\"yaw\":%.2f"
+        ",\"rollNorm\":%.4f,\"pitchNorm\":%.4f,\"yawNorm\":%.4f}\n",
+        orientation_step_key(s_orientation_cal_step),
+        s_orientation_cal_step == ORIENTATION_CAL_DONE ? "true" : "false",
+        (double)s_roll_deg, (double)s_pitch_deg, (double)s_yaw_deg,
+        (double)s_roll_normalized, (double)s_pitch_normalized,
+        (double)s_yaw_normalized);
+    fflush(stdout);
+}
+
+static lv_obj_t *create_control_card(lv_obj_t *parent, const char *title,
+                                     const char *subtitle, lv_color_t color)
+{
+    lv_obj_t *card = lv_obj_create(parent);
+    lv_obj_set_size(card, 324, 126);
+    lv_obj_set_style_radius(card, 20, 0);
+    lv_obj_set_style_bg_color(card, lv_color_hex(0x24202D), 0);
+    lv_obj_set_style_bg_opa(card, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(card, 3, 0);
+    lv_obj_set_style_border_color(card, color, 0);
+    lv_obj_set_style_shadow_width(card, 0, 0);
+    lv_obj_clear_flag(card, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+
+    lv_obj_t *title_label = lv_label_create(card);
     lv_label_set_text(title_label, title);
     lv_obj_set_style_text_color(title_label, lv_color_hex(0xFFF4DE), 0);
     lv_obj_set_style_text_font(title_label, &lv_font_montserrat_14, 0);
     lv_obj_align(title_label, LV_ALIGN_TOP_LEFT, 4, 14);
 
-    lv_obj_t *subtitle_label = lv_label_create(button);
+    lv_obj_t *subtitle_label = lv_label_create(card);
     lv_label_set_text(subtitle_label, subtitle);
     lv_obj_set_style_text_color(subtitle_label, lv_color_hex(0xBDB1C8), 0);
     lv_obj_align(subtitle_label, LV_ALIGN_BOTTOM_LEFT, 4, -14);
 
-    lv_obj_t *icon = lv_obj_create(button);
+    lv_obj_t *icon = lv_obj_create(card);
     lv_obj_set_size(icon, 34, 34);
     lv_obj_set_style_radius(icon, LV_RADIUS_CIRCLE, 0);
     lv_obj_set_style_bg_color(icon, color, 0);
     lv_obj_set_style_border_width(icon, 0, 0);
     lv_obj_align(icon, LV_ALIGN_RIGHT_MID, -6, 0);
     lv_obj_clear_flag(icon, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
-    return button;
+    return card;
+}
+
+static void display_rounder(lv_area_t *area)
+{
+    area->x1 &= ~1;
+    area->y1 &= ~1;
+    area->x2 |= 1;
+    area->y2 |= 1;
+}
+
+static lv_display_t *start_safe_display(void)
+{
+    const lvgl_port_cfg_t lvgl_config = ESP_LVGL_PORT_INIT_CONFIG();
+    if (lvgl_port_init(&lvgl_config) != ESP_OK) {
+        ESP_LOGE(TAG, "Could not initialize LVGL");
+        return NULL;
+    }
+
+    esp_lcd_panel_handle_t panel = NULL;
+    esp_lcd_panel_io_handle_t panel_io = NULL;
+    const bsp_display_config_t panel_config = {
+        .max_transfer_sz = BSP_LCD_H_RES * DISPLAY_BUFFER_LINES * sizeof(lv_color16_t),
+    };
+    if (bsp_display_new(&panel_config, &panel, &panel_io) != ESP_OK) {
+        ESP_LOGE(TAG, "Could not initialize CO5300 panel");
+        return NULL;
+    }
+
+    const lvgl_port_display_cfg_t display_config = {
+        .io_handle = panel_io,
+        .panel_handle = panel,
+        .buffer_size = BSP_LCD_H_RES * DISPLAY_BUFFER_LINES,
+        .double_buffer = false,
+        .hres = BSP_LCD_H_RES,
+        .vres = BSP_LCD_V_RES,
+        .monochrome = false,
+        .rounder_cb = display_rounder,
+        .color_format = LV_COLOR_FORMAT_RGB565,
+        .rotation = {
+            .swap_xy = false,
+            .mirror_x = false,
+            .mirror_y = false,
+        },
+        .flags = {
+            .buff_dma = true,
+            .buff_spiram = false,
+            .sw_rotate = true,
+            .swap_bytes = true,
+        },
+    };
+    lv_display_t *display = lvgl_port_add_disp(&display_config);
+    if (display == NULL) {
+        ESP_LOGE(TAG, "Could not register QSPI display with LVGL");
+        return NULL;
+    }
+
+    esp_lcd_touch_handle_t touch = NULL;
+    if (bsp_touch_new(NULL, &touch) == ESP_OK) {
+        const lvgl_port_touch_cfg_t touch_config = {
+            .disp = display,
+            .handle = touch,
+        };
+        s_display_input = lvgl_port_add_touch(&touch_config);
+    } else {
+        ESP_LOGW(TAG, "Touch controller unavailable");
+    }
+    if (bsp_display_brightness_init() != ESP_OK) {
+        ESP_LOGW(TAG, "Display brightness control unavailable");
+    }
+    ESP_LOGI(TAG, "QSPI display uses transfer-complete flush with internal DMA buffer");
+    return display;
 }
 
 static void ui_status_timer(lv_timer_t *timer)
 {
     (void)timer;
+    static int displayed_altitude_m = -1;
     if (s_status_label == NULL) {
         return;
     }
+    if (s_calibration_overlay != NULL) {
+        if (s_orientation_cal_step == ORIENTATION_CAL_DONE) {
+            lv_obj_add_flag(s_calibration_overlay, LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_clear_flag(s_calibration_overlay, LV_OBJ_FLAG_HIDDEN);
+            lv_label_set_text(s_calibration_step_label,
+                              orientation_step_name(s_orientation_cal_step));
+            if (s_orientation_capture_rejected) {
+                lv_label_set_text(s_calibration_prompt_label,
+                                  "Move farther in the opposite direction\n\nPRESS BOOT AGAIN");
+            } else if (s_orientation_cal_step == ORIENTATION_CAL_GYRO) {
+                lv_label_set_text(s_calibration_prompt_label,
+                                  "Keep the controller still\n\nCALIBRATING GYRO");
+            } else {
+                lv_label_set_text_fmt(s_calibration_prompt_label, "%s\n\nPRESS BOOT TO CAPTURE",
+                                      orientation_step_prompt(s_orientation_cal_step));
+            }
+            lv_label_set_text_fmt(s_calibration_values_label, "ROLL %+.0f   PITCH %+.0f   YAW %+.0f",
+                                  (double)s_roll_deg, (double)s_pitch_deg, (double)s_yaw_deg);
+        }
+    }
+
     const char *text = "KEEP STILL  /  CALIBRATING";
     if (s_calibrated) {
-        if (s_touch_held && s_control_mode == CONTROL_LASER) {
-            text = "LASER ON  /  TILT TO AIM";
-        } else if (s_touch_held && s_control_mode == CONTROL_MOVE) {
-            text = "MOVE ON  /  TILT TO AIM";
+        if (s_pwr_pressed && s_boot_pressed) {
+            text = "PWR + BOOT  /  ACTIVE";
+        } else if (s_boot_pressed) {
+            text = "BOOT  /  ACTIVE";
+        } else if (s_pwr_pressed) {
+            text = "PWR  /  ACTIVE";
         } else if (s_ble_connected) {
-            text = "READY  /  BLE CONNECTED";
+            text = "MOTION ON  /  BLE CONNECTED";
         } else {
-            text = "READY  /  USB LIVE";
+            text = "MOTION ON  /  USB LIVE";
         }
     }
     lv_label_set_text(s_status_label, text);
+    if (s_altitude_label != NULL && displayed_altitude_m != s_flight_altitude_m) {
+        lv_label_set_text_fmt(s_altitude_label, "ALT  %04d m", s_flight_altitude_m);
+        if (s_altitude_bar != NULL) {
+            lv_bar_set_value(s_altitude_bar, s_flight_altitude_m, LV_ANIM_ON);
+        }
+        displayed_altitude_m = s_flight_altitude_m;
+    }
 }
 
 static void create_control_ui(void)
@@ -197,27 +569,79 @@ static void create_control_ui(void)
     lv_obj_clear_flag(screen, LV_OBJ_FLAG_SCROLLABLE);
 
     lv_obj_t *eyebrow = lv_label_create(screen);
-    lv_label_set_text(eyebrow, "POCKET CAT CONTROLLER");
+    lv_label_set_text(eyebrow, "FLIGHT CONTROLS");
     lv_obj_set_style_text_color(eyebrow, lv_color_hex(0xE9AFAF), 0);
-    lv_obj_align(eyebrow, LV_ALIGN_TOP_MID, 0, 24);
+    lv_obj_align(eyebrow, LV_ALIGN_TOP_LEFT, 22, 22);
+
+    s_altitude_label = lv_label_create(screen);
+    lv_label_set_text_fmt(s_altitude_label, "ALT  %04d m", s_flight_altitude_m);
+    lv_obj_set_style_text_color(s_altitude_label, lv_color_hex(0x86FFD0), 0);
+    lv_obj_set_style_text_font(s_altitude_label, &lv_font_montserrat_14, 0);
+    lv_obj_align(s_altitude_label, LV_ALIGN_TOP_RIGHT, -22, 22);
 
     lv_obj_t *hint = lv_label_create(screen);
-    lv_label_set_text(hint, "HOLD A BUTTON + TILT");
+    lv_label_set_text(hint, "TILT ANYTIME  /  BUTTONS BELOW");
     lv_obj_set_style_text_color(hint, lv_color_hex(0xFFF4DE), 0);
     lv_obj_align(hint, LV_ALIGN_TOP_MID, 0, 54);
 
-    lv_obj_t *move = create_control_button(screen, CONTROL_MOVE, "MOVE", "pointer only",
-                                           lv_color_hex(0x6AA7A2));
-    lv_obj_align(move, LV_ALIGN_TOP_MID, 0, 92);
+    s_altitude_bar = lv_bar_create(screen);
+    lv_obj_set_size(s_altitude_bar, 324, 6);
+    lv_bar_set_range(s_altitude_bar, FLIGHT_ALTITUDE_MIN_M, FLIGHT_ALTITUDE_MAX_M);
+    lv_bar_set_value(s_altitude_bar, s_flight_altitude_m, LV_ANIM_OFF);
+    lv_obj_set_style_bg_color(s_altitude_bar, lv_color_hex(0x342E3C), LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(s_altitude_bar, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_style_bg_color(s_altitude_bar, lv_color_hex(0x86FFD0), LV_PART_INDICATOR);
+    lv_obj_align(s_altitude_bar, LV_ALIGN_TOP_MID, 0, 77);
 
-    lv_obj_t *laser = create_control_button(screen, CONTROL_LASER, "LASER", "pointer + cat chase",
-                                            lv_color_hex(0xE85D75));
-    lv_obj_align(laser, LV_ALIGN_TOP_MID, 0, 232);
+    lv_obj_t *pwr = create_control_card(screen, "PWR", "secondary action / short press",
+                                        lv_color_hex(0x6AA7A2));
+    lv_obj_align(pwr, LV_ALIGN_TOP_MID, 0, 92);
+
+    lv_obj_t *boot = create_control_card(screen, "BOOT", "primary action",
+                                         lv_color_hex(0xE85D75));
+    lv_obj_align(boot, LV_ALIGN_TOP_MID, 0, 232);
 
     s_status_label = lv_label_create(screen);
     lv_label_set_text(s_status_label, "KEEP STILL  /  CALIBRATING");
     lv_obj_set_style_text_color(s_status_label, lv_color_hex(0x9A8FA6), 0);
     lv_obj_align(s_status_label, LV_ALIGN_BOTTOM_MID, 0, -28);
+
+    s_calibration_overlay = lv_obj_create(screen);
+    lv_obj_set_size(s_calibration_overlay, BSP_LCD_H_RES, BSP_LCD_V_RES);
+    lv_obj_align(s_calibration_overlay, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_set_style_radius(s_calibration_overlay, 0, 0);
+    lv_obj_set_style_border_width(s_calibration_overlay, 0, 0);
+    lv_obj_set_style_bg_color(s_calibration_overlay, lv_color_hex(0x111722), 0);
+    lv_obj_set_style_bg_opa(s_calibration_overlay, LV_OPA_COVER, 0);
+    lv_obj_set_style_pad_all(s_calibration_overlay, 22, 0);
+    lv_obj_clear_flag(s_calibration_overlay, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+
+    lv_obj_t *calibration_eyebrow = lv_label_create(s_calibration_overlay);
+    lv_label_set_text(calibration_eyebrow, "ORIENTATION SETUP");
+    lv_obj_set_style_text_color(calibration_eyebrow, lv_color_hex(0x86FFD0), 0);
+    lv_obj_align(calibration_eyebrow, LV_ALIGN_TOP_LEFT, 0, 4);
+
+    s_calibration_step_label = lv_label_create(s_calibration_overlay);
+    lv_label_set_text(s_calibration_step_label, "GYRO CALIBRATION");
+    lv_obj_set_style_text_color(s_calibration_step_label, lv_color_hex(0xE9AFAF), 0);
+    lv_obj_set_style_text_font(s_calibration_step_label, &lv_font_montserrat_14, 0);
+    lv_obj_align(s_calibration_step_label, LV_ALIGN_TOP_LEFT, 0, 58);
+
+    s_calibration_prompt_label = lv_label_create(s_calibration_overlay);
+    lv_obj_set_width(s_calibration_prompt_label, 324);
+    lv_label_set_long_mode(s_calibration_prompt_label, LV_LABEL_LONG_WRAP);
+    lv_obj_set_style_text_align(s_calibration_prompt_label, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_color(s_calibration_prompt_label, lv_color_hex(0xFFF4DE), 0);
+    lv_obj_set_style_text_font(s_calibration_prompt_label, &lv_font_montserrat_14, 0);
+    lv_label_set_text(s_calibration_prompt_label,
+                      "Keep the controller still\n\nCALIBRATING GYRO");
+    lv_obj_align(s_calibration_prompt_label, LV_ALIGN_CENTER, 0, -8);
+
+    s_calibration_values_label = lv_label_create(s_calibration_overlay);
+    lv_label_set_text(s_calibration_values_label, "ROLL --   PITCH --   YAW --");
+    lv_obj_set_style_text_color(s_calibration_values_label, lv_color_hex(0x8191A8), 0);
+    lv_obj_align(s_calibration_values_label, LV_ALIGN_BOTTOM_MID, 0, -18);
+
     lv_timer_create(ui_status_timer, 150, NULL);
     bsp_display_unlock();
 }
@@ -334,8 +758,6 @@ static int ble_gap_event(struct ble_gap_event *event, void *arg)
         break;
     case BLE_GAP_EVENT_DISCONNECT:
         s_ble_connected = false;
-        s_clutch_active = false;
-        s_clutch_arming = false;
         emit_airmouse_state();
         start_advertising();
         break;
@@ -376,8 +798,6 @@ static void hid_event_callback(void *handler_args, esp_event_base_t base, int32_
         break;
     case ESP_HIDD_DISCONNECT_EVENT:
         s_ble_connected = false;
-        s_clutch_active = false;
-        s_clutch_arming = false;
         emit_airmouse_state();
         break;
     default:
@@ -447,7 +867,99 @@ static void command_task(void *arg)
             requested >= MIN_SENSITIVITY && requested <= MAX_SENSITIVITY) {
             s_sensitivity = requested;
             emit_airmouse_state();
+            continue;
         }
+        int requested_altitude = 0;
+        if (sscanf(line, "ALT %d", &requested_altitude) == 1 &&
+            requested_altitude >= FLIGHT_ALTITUDE_MIN_M &&
+            requested_altitude <= FLIGHT_ALTITUDE_MAX_M) {
+            s_flight_altitude_m = requested_altitude;
+            emit_airmouse_state();
+        }
+    }
+}
+
+static esp_err_t axp2101_read_register(uint8_t reg, uint8_t *value)
+{
+    return i2c_master_transmit_receive(s_axp2101, &reg, sizeof(reg), value, sizeof(*value),
+                                       I2C_TIMEOUT_MS);
+}
+
+static esp_err_t axp2101_write_register(uint8_t reg, uint8_t value)
+{
+    const uint8_t command[] = {reg, value};
+    return i2c_master_transmit(s_axp2101, command, sizeof(command), I2C_TIMEOUT_MS);
+}
+
+static esp_err_t init_physical_buttons(i2c_master_bus_handle_t bus_handle)
+{
+    const gpio_config_t boot_config = {
+        .pin_bit_mask = 1ULL << BOOT_BUTTON_GPIO,
+        .mode = GPIO_MODE_INPUT,
+        .pull_up_en = GPIO_PULLUP_ENABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE,
+    };
+    esp_err_t result = gpio_config(&boot_config);
+    if (result != ESP_OK) {
+        return result;
+    }
+    const i2c_device_config_t axp2101_config = {
+        .dev_addr_length = I2C_ADDR_BIT_LEN_7,
+        .device_address = AXP2101_I2C_ADDRESS,
+        .scl_speed_hz = 400000,
+    };
+    result = i2c_master_bus_add_device(bus_handle, &axp2101_config, &s_axp2101);
+    if (result != ESP_OK) {
+        return result;
+    }
+    uint8_t interrupts_enabled = 0;
+    result = axp2101_read_register(AXP2101_INTEN2_REGISTER, &interrupts_enabled);
+    if (result != ESP_OK) {
+        return result;
+    }
+    const uint8_t pkey_interrupts = AXP2101_PKEY_SHORT_IRQ | AXP2101_PKEY_LONG_IRQ;
+    result = axp2101_write_register(AXP2101_INTEN2_REGISTER,
+                                    interrupts_enabled | pkey_interrupts);
+    if (result != ESP_OK) {
+        return result;
+    }
+    return axp2101_write_register(AXP2101_INTSTS2_REGISTER, pkey_interrupts);
+}
+
+static void poll_physical_buttons(int64_t elapsed_ms, bool *state_changed)
+{
+    static bool raw_boot_previous;
+    static uint8_t boot_stable_samples;
+    static int64_t pwr_release_at_ms;
+    const bool raw_boot = gpio_get_level(BOOT_BUTTON_GPIO) == 0;
+    uint8_t pwr_status = 0;
+    if (axp2101_read_register(AXP2101_INTSTS2_REGISTER, &pwr_status) == ESP_OK) {
+        const uint8_t pwr_events = pwr_status & (AXP2101_PKEY_SHORT_IRQ | AXP2101_PKEY_LONG_IRQ);
+        if (pwr_events != 0) {
+            axp2101_write_register(AXP2101_INTSTS2_REGISTER, pwr_events);
+            if (!s_pwr_pressed) {
+                s_pwr_pressed = true;
+                *state_changed = true;
+            }
+            pwr_release_at_ms = elapsed_ms + PWR_EVENT_PULSE_MS;
+        }
+    }
+    if (s_pwr_pressed && elapsed_ms >= pwr_release_at_ms) {
+        s_pwr_pressed = false;
+        *state_changed = true;
+    }
+    if (raw_boot == raw_boot_previous) {
+        if (boot_stable_samples < BUTTON_DEBOUNCE_SAMPLES) {
+            ++boot_stable_samples;
+        }
+    } else {
+        raw_boot_previous = raw_boot;
+        boot_stable_samples = 1;
+    }
+    if (boot_stable_samples >= BUTTON_DEBOUNCE_SAMPLES && s_boot_pressed != raw_boot) {
+        s_boot_pressed = raw_boot;
+        *state_changed = true;
     }
 }
 
@@ -457,13 +969,13 @@ static void stream_samples(qmi8658_dev_t *imu)
     uint32_t sequence = 0;
     uint32_t calibration_count = 0;
     float calibration_sum[3] = {0};
-    int64_t touch_started_ms = 0;
-    bool was_touching = false;
     float filtered_x = 0.0f;
     float filtered_y = 0.0f;
     float remainder_x = 0.0f;
     float remainder_y = 0.0f;
     int64_t last_state_emit_ms = 0;
+    int64_t last_orientation_emit_ms = 0;
+    bool was_boot_pressed = false;
 
     emit_airmouse_state();
     while (true) {
@@ -474,6 +986,13 @@ static void stream_samples(qmi8658_dev_t *imu)
             result = qmi8658_read_sensor_data(imu, &data);
             if (result == ESP_OK) {
                 const int64_t elapsed_ms = esp_timer_get_time() / 1000;
+                bool button_state_changed = false;
+                poll_physical_buttons(elapsed_ms, &button_state_changed);
+                const bool boot_pressed_edge = s_boot_pressed && !was_boot_pressed;
+                was_boot_pressed = s_boot_pressed;
+                if (button_state_changed) {
+                    emit_airmouse_state();
+                }
                 printf(
                     "{\"seq\":%" PRIu32 ",\"t\":%" PRIi64
                     ",\"ax\":%.4f,\"ay\":%.4f,\"az\":%.4f"
@@ -500,33 +1019,21 @@ static void stream_samples(qmi8658_dev_t *imu)
                             s_gyro_bias[axis] = calibration_sum[axis] / calibration_count;
                         }
                         s_calibrated = true;
+                        s_orientation_cal_step = ORIENTATION_CAL_CENTER;
                         ESP_LOGI(TAG, "Gyro calibrated: %.4f %.4f %.4f dps",
                                  s_gyro_bias[0], s_gyro_bias[1], s_gyro_bias[2]);
                         emit_airmouse_state();
                     }
                 }
 
-                const bool touching = s_touch_held;
-                if (touching && !was_touching) {
-                    touch_started_ms = elapsed_ms;
-                    s_clutch_arming = true;
-                    s_clutch_active = false;
-                    filtered_x = filtered_y = remainder_x = remainder_y = 0.0f;
-                    emit_airmouse_state();
-                } else if (!touching && was_touching) {
-                    s_clutch_arming = false;
-                    s_clutch_active = false;
-                    filtered_x = filtered_y = remainder_x = remainder_y = 0.0f;
-                    emit_airmouse_state();
-                }
-                if (touching && s_clutch_arming && s_calibrated &&
-                    elapsed_ms - touch_started_ms >= TOUCH_HOLD_MS) {
-                    s_clutch_arming = false;
-                    s_clutch_active = true;
-                    filtered_x = filtered_y = remainder_x = remainder_y = 0.0f;
-                    emit_airmouse_state();
-                }
-                if (touching && s_clutch_active) {
+                if (s_calibrated) {
+                    update_orientation(&data, SAMPLE_PERIOD_MS / 1000.0f);
+                    if (boot_pressed_edge && s_orientation_initialized &&
+                        s_orientation_cal_step != ORIENTATION_CAL_DONE) {
+                        capture_orientation_calibration();
+                        emit_orientation();
+                    }
+
                     // Screen yaw is gyro Z; screen pitch is gyro X. Linear acceleration is never used.
                     const float rate_x = apply_dead_zone(data.gyroZ - s_gyro_bias[2]);
                     const float rate_y = apply_dead_zone(data.gyroX - s_gyro_bias[0]);
@@ -535,17 +1042,24 @@ static void stream_samples(qmi8658_dev_t *imu)
                     const int8_t dx = report_delta(filtered_x * s_sensitivity, &remainder_x);
                     const int8_t dy = report_delta(filtered_y * s_sensitivity, &remainder_y);
                     if (dx != 0 || dy != 0) {
-                        printf("{\"type\":\"cursor\",\"dx\":%d,\"dy\":%d,\"mode\":\"%s\"}\n",
-                               dx, dy, control_mode_name(s_control_mode));
+                        printf("{\"type\":\"cursor\",\"dx\":%d,\"dy\":%d,\"mode\":\"%s\""
+                               ",\"pwr\":%s,\"boot\":%s}\n",
+                               dx, dy, control_mode_name(),
+                               s_pwr_pressed ? "true" : "false",
+                               s_boot_pressed ? "true" : "false");
                         fflush(stdout);
                     }
                     send_mouse_report(dx, dy);
+                }
+                if (s_orientation_initialized &&
+                    elapsed_ms - last_orientation_emit_ms >= ORIENTATION_EMIT_PERIOD_MS) {
+                    emit_orientation();
+                    last_orientation_emit_ms = elapsed_ms;
                 }
                 if (elapsed_ms - last_state_emit_ms >= 1000) {
                     emit_airmouse_state();
                     last_state_emit_ms = elapsed_ms;
                 }
-                was_touching = touching;
             }
         } else if (result != ESP_OK) {
             ESP_LOGW(TAG, "Data-ready read failed: %s", esp_err_to_name(result));
@@ -556,16 +1070,18 @@ static void stream_samples(qmi8658_dev_t *imu)
 
 void app_main(void)
 {
-    lv_display_t *display = bsp_display_start();
-    s_touch_available = display != NULL && bsp_display_get_input_dev() != NULL;
+    lv_display_t *display = start_safe_display();
+    s_touch_available = display != NULL && s_display_input != NULL;
     if (!s_touch_available) {
         ESP_LOGE(TAG, "Display or touch controller unavailable");
     } else {
         create_control_ui();
-        ESP_LOGI(TAG, "Touch controls ready: MOVE and LASER");
+        ESP_LOGI(TAG, "Display ready; motion is always active after calibration");
     }
     i2c_master_bus_handle_t bus_handle = bsp_i2c_get_handle();
     ESP_ERROR_CHECK(bus_handle == NULL ? ESP_FAIL : ESP_OK);
+    ESP_ERROR_CHECK(init_physical_buttons(bus_handle));
+    ESP_LOGI(TAG, "Physical controls ready: PWR via AXP2101 PKEY, BOOT on GPIO0");
 
     uint8_t address = 0;
     esp_err_t result = detect_imu_address(bus_handle, &address);

@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>QMI8658 Low-Poly Flight</title>
+  <title>QMI8658 Flight Controls Lab</title>
   <style>
     :root { color-scheme: dark; --ink:#f4fbff; --muted:#a8bdc7; --glass:rgba(7,20,29,.58); --line:rgba(255,255,255,.18); --mint:#86ffd0; --amber:#ffd77d; }
     * { box-sizing: border-box; }
@@ -20,7 +20,7 @@
     .badge { border: 1px solid var(--line); border-radius: 999px; padding: 7px 10px; color: rgba(244,251,255,.72); background: var(--glass); font-size: 10px; font-weight: 760; letter-spacing: .09em; text-transform: uppercase; backdrop-filter: blur(12px); }
     .badge.live { color: var(--mint); border-color: rgba(134,255,208,.45); }
     .badge.active { color: #092118; background: var(--mint); border-color: var(--mint); text-shadow: none; box-shadow: 0 0 28px rgba(134,255,208,.4); }
-    .telemetry { position: absolute; left: 22px; bottom: 20px; display: grid; grid-template-columns: repeat(3, auto); gap: 8px; }
+    .telemetry { position: absolute; left: 22px; bottom: 20px; display: grid; grid-template-columns: repeat(6, auto); gap: 8px; }
     .readout { min-width: 86px; border-left: 2px solid rgba(255,255,255,.6); padding: 3px 10px; }
     .readout small { display: block; color: rgba(244,251,255,.65); font-size: 9px; font-weight: 750; letter-spacing: .13em; text-transform: uppercase; }
     .readout strong { display: block; margin-top: 2px; font: 700 17px ui-monospace, SFMono-Regular, Menlo, monospace; }
@@ -29,24 +29,27 @@
     .reticle { position: absolute; left: 50%; top: 50%; width: 76px; height: 44px; margin: -22px -38px; opacity: .9; }
     .reticle::before { content:""; position:absolute; left:0; right:0; top:21px; height:2px; background:var(--ink); clip-path:polygon(0 0, 31% 0, 31% 100%, 69% 100%, 69% 0, 100% 0, 100% 100%, 0 100%); }
     .reticle::after { content:""; position:absolute; left:37px; top:12px; width:2px; height:20px; background:var(--ink); }
-    @media (max-width:720px) { .telemetry { bottom: 70px; } .status { bottom: 16px; left: 18px; right: 18px; justify-content: center; } .help { bottom: 118px; } .brand p { display:none; } .action { padding: 8px 9px; } }
+    @media (max-width:900px) { .telemetry { grid-template-columns: repeat(3, auto); bottom: 70px; } .status { bottom: 16px; left: 18px; right: 18px; justify-content: center; } .help { bottom: 148px; } .brand p { display:none; } .action { padding: 8px 9px; } }
   </style>
 </head>
 <body>
-  <canvas id="scene" aria-label="Low-poly landscape flight simulator"></canvas>
+  <canvas id="scene" aria-label="Flight controls simulator over a flat grid"></canvas>
   <div class="chrome">
     <div class="topbar">
-      <div class="brand"><p id="region">Generating region…</p><h1>Low-Poly Flight</h1></div>
-      <div class="actions"><button class="action" id="regenerate">New landscape</button><a class="action" href="/">← Motion lab</a></div>
+      <div class="brand"><p>Flat-grid controls test</p><h1>Flight Lab</h1></div>
+      <div class="actions"><a class="action" href="/">← Motion lab</a></div>
     </div>
     <div class="reticle"></div>
     <div class="telemetry">
       <div class="readout"><small>Altitude</small><strong id="altitude">840 m</strong></div>
       <div class="readout"><small>Airspeed</small><strong id="speed">120 kt</strong></div>
       <div class="readout"><small>Heading</small><strong id="heading">000°</strong></div>
+      <div class="readout"><small>Roll</small><strong id="rollAngle">—</strong></div>
+      <div class="readout"><small>Pitch</small><strong id="pitchAngle">—</strong></div>
+      <div class="readout"><small>Yaw</small><strong id="yawAngle">—</strong></div>
     </div>
-    <div class="help" id="help">Hold touchscreen, then rotate to fly</div>
-    <div class="status"><span class="badge" id="serial">USB waiting</span><span class="badge" id="gyro">Gyro calibrating</span><span class="badge" id="clutch">Clutch idle</span></div>
+    <div class="help active" id="help">Rotate to fly · BOOT boosts · PWR airbrakes</div>
+    <div class="status"><span class="badge" id="serial">USB waiting</span><span class="badge" id="gyro">Gyro calibrating</span><span class="badge" id="boot">BOOT</span><span class="badge" id="pwr">PWR</span></div>
   </div>
   <script>
     const canvas = document.querySelector('#scene');
@@ -54,57 +57,12 @@
     let width = 1, height = 1, dpr = 1;
     let last = performance.now(), distance = 0, heading = 0, altitude = 840;
     let targetRoll = 0, targetPitch = 0, roll = 0, pitch = 0;
-    let clutchActive = false;
-    let landscape;
+    let bootPressed = false, pwrPressed = false;
+    let orientationCalibrated = false, orientationAt = 0, yawControl = 0;
+    let lastAltitudeSent = null, lastAltitudeSentAt = 0;
 
     const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
     const mix = (a, b, t) => a + (b - a) * t;
-
-    function seededRandom(seed) {
-      return () => {
-        seed |= 0; seed = seed + 0x6d2b79f5 | 0;
-        let value = Math.imul(seed ^ seed >>> 15, 1 | seed);
-        value = value + Math.imul(value ^ value >>> 7, 61 | value) ^ value;
-        return ((value ^ value >>> 14) >>> 0) / 4294967296;
-      };
-    }
-
-    function generateLandscape() {
-      const seed = crypto.getRandomValues(new Uint32Array(1))[0];
-      const random = seededRandom(seed);
-      const first = ['Copper', 'Cedar', 'Juniper', 'Amber', 'Silver', 'Echo', 'Willow', 'Sage'];
-      const lastNames = ['Reach', 'Valley', 'Highlands', 'Basin', 'Pass', 'Wilds', 'Delta', 'Range'];
-      const hue = Math.round(55 + random() * 92);
-      const mountainHue = Math.round(hue + 12 + random() * 25);
-      const makeRidge = count => Array.from({length:count}, () => .25 + random() * .78);
-      landscape = {
-        seed,
-        name: `${first[Math.floor(random()*first.length)]} ${lastNames[Math.floor(random()*lastNames.length)]}`,
-        ridges: [makeRidge(12), makeRidge(12)],
-        mountainColors: [`hsl(${mountainHue} 18% 56%)`, `hsl(${mountainHue} 23% 38%)`],
-        ground: [
-          `hsl(${hue} 25% 35%)`, `hsl(${hue+9} 29% 42%)`,
-          `hsl(${hue-12} 31% 47%)`, `hsl(${hue+18} 21% 31%)`,
-          `hsl(${hue-20} 37% 54%)`
-        ],
-        sky: [`hsl(${190 + random()*24} 62% 61%)`, `hsl(${177 + random()*18} 43% 82%)`, `hsl(${35 + random()*18} 72% 81%)`],
-        sunX: .18 + random() * .64,
-        sunSize: 22 + random() * 25,
-        waterX: .34 + random() * .32,
-        waterWidth: .18 + random() * .34,
-        waterBend: (random() - .5) * .9,
-        feature: random() < .72 ? 'river' : 'road'
-      };
-      distance = 0;
-      canvas.dataset.seed = String(seed);
-      document.querySelector('#region').textContent = `${landscape.name} · ${seed.toString(16).slice(0,6).toUpperCase()}`;
-    }
-
-    function terrainTone(row, col, phase) {
-      let value = Math.imul(col + phase + 104729, 374761393) ^ Math.imul(row + landscape.seed, 668265263);
-      value = (value ^ value >>> 13) * 1274126177;
-      return Math.abs(value ^ value >>> 16) % landscape.ground.length;
-    }
 
     function resize() {
       dpr = Math.min(2, window.devicePixelRatio || 1);
@@ -114,19 +72,43 @@
     }
 
     function steer(dx, dy) {
-      if (!clutchActive) return;
       targetRoll = clamp(targetRoll + dx * .008, -.95, .95);
       targetPitch = clamp(targetPitch + dy * .006, -.52, .52);
     }
 
-    function setClutch(state) {
-      clutchActive = state === 'active';
-      const clutch = document.querySelector('#clutch');
+    function setButtons(state) {
+      bootPressed = orientationCalibrated && !!state.boot;
+      pwrPressed = orientationCalibrated && !!state.pwr;
+      const boot = document.querySelector('#boot');
+      const pwr = document.querySelector('#pwr');
+      boot.textContent = bootPressed ? 'BOOT · boost' : 'BOOT';
+      pwr.textContent = pwrPressed ? 'PWR · brake' : 'PWR';
+      boot.className = `badge ${bootPressed ? 'active' : ''}`;
+      pwr.className = `badge ${pwrPressed ? 'active' : ''}`;
+    }
+
+    function setOrientation(state) {
+      orientationCalibrated = !!state.calibrated;
+      orientationAt = performance.now();
+      document.querySelector('#rollAngle').textContent = `${Number(state.roll).toFixed(0)}°`;
+      document.querySelector('#pitchAngle').textContent = `${Number(state.pitch).toFixed(0)}°`;
+      document.querySelector('#yawAngle').textContent = `${Number(state.yaw).toFixed(0)}°`;
+      const gyro = document.querySelector('#gyro');
       const help = document.querySelector('#help');
-      clutch.textContent = state === 'active' ? 'Clutch active' : state === 'arming' ? 'Hold…' : 'Clutch idle';
-      clutch.className = `badge ${state === 'active' ? 'active' : ''}`;
-      help.textContent = state === 'active' ? 'Flying — lift to level the controls' : state === 'arming' ? 'Keep holding…' : 'Hold touchscreen, then rotate to fly';
-      help.classList.toggle('active', state === 'active');
+      if (orientationCalibrated) {
+        targetRoll = clamp(Number(state.rollNorm) * .95, -.95, .95);
+        targetPitch = clamp(Number(state.pitchNorm) * .52, -.52, .52);
+        yawControl = clamp(Number(state.yawNorm), -1, 1);
+        gyro.textContent = '3-axis calibrated';
+        gyro.className = 'badge live';
+        help.textContent = 'Roll · pitch · yaw live · BOOT boosts · PWR airbrakes';
+      } else {
+        yawControl = 0;
+        const step = String(state.step || 'gyro').replaceAll('_', ' ');
+        gyro.textContent = `Setup · ${step}`;
+        gyro.className = 'badge';
+        help.textContent = 'Follow the board screen and press BOOT for each pose';
+      }
     }
 
     function polygon(points, fill) {
@@ -137,66 +119,49 @@
 
     function drawSky(horizon) {
       const sky = ctx.createLinearGradient(0, 0, 0, horizon);
-      sky.addColorStop(0, landscape.sky[0]); sky.addColorStop(.72, landscape.sky[1]); sky.addColorStop(1, landscape.sky[2]);
+      sky.addColorStop(0, '#52a9d2'); sky.addColorStop(.72, '#8bcbdc'); sky.addColorStop(1, '#d9e9d4');
       ctx.fillStyle = sky; ctx.fillRect(0, 0, width, Math.max(height, horizon));
-      const sunX = width * landscape.sunX - Math.sin(heading) * width * .12;
+      const sunX = width * .72 - Math.sin(heading) * width * .12;
       const sunY = Math.max(65, horizon * .42);
-      ctx.fillStyle = 'rgba(255,238,169,.92)'; ctx.beginPath(); ctx.arc(sunX, sunY, landscape.sunSize, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = 'rgba(255,238,169,.92)'; ctx.beginPath(); ctx.arc(sunX, sunY, 34, 0, Math.PI * 2); ctx.fill();
     }
 
-    function drawMountains(horizon) {
-      const drift = Math.sin(heading * .65) * width * .18;
-      const layers = [
-        {base:horizon + 24, amp:145, color:landscape.mountainColors[0], offset:-80},
-        {base:horizon + 48, amp:105, color:landscape.mountainColors[1], offset:30}
-      ];
-      layers.forEach((layer, layerIndex) => {
-        const step = width / 9;
-        const points = [[0, layer.base]];
-        for (let i = -1; i <= 10; i++) {
-          const ridge = landscape.ridges[layerIndex][(i + 12) % landscape.ridges[layerIndex].length];
-          points.push([i * step + drift * (layerIndex ? .7 : .35) + layer.offset, layer.base - layer.amp * ridge]);
-        }
-        points.push([width, height], [0, height]); polygon(points, layer.color);
-      });
-    }
+    function drawGrid(horizon) {
+      const groundTop = horizon + 1;
+      const ground = ctx.createLinearGradient(0, groundTop, 0, height);
+      ground.addColorStop(0, '#4f7465');
+      ground.addColorStop(1, '#183f3d');
+      ctx.fillStyle = ground;
+      ctx.fillRect(-width, groundTop, width * 3, height - groundTop);
 
-    function drawTerrain(horizon) {
-      const rows = 12, cols = 12;
-      const groundTop = horizon + 35;
-      for (let row = 0; row < rows; row++) {
-        const z0 = row / rows, z1 = (row + 1) / rows;
-        const y0 = groundTop + (height - groundTop) * z0 * z0;
-        const y1 = groundTop + (height - groundTop) * z1 * z1;
-        const scale0 = .12 + z0 * 1.12, scale1 = .12 + z1 * 1.12;
-        const scroll = (distance * (1 + row * .16)) % (width / cols);
-        for (let col = -2; col < cols + 2; col++) {
-          const center = width / 2 + Math.sin(heading) * width * .5;
-          const x0 = center + ((col / cols) * width - width / 2 - scroll) * scale0;
-          const x1 = center + (((col + 1) / cols) * width - width / 2 - scroll) * scale0;
-          const x2 = center + (((col + 1) / cols) * width - width / 2 - scroll) * scale1;
-          const x3 = center + ((col / cols) * width - width / 2 - scroll) * scale1;
-          const phase = Math.floor(distance / 80);
-          const tone = terrainTone(row, col, phase);
-          polygon([[x0,y0],[x1,y0],[x3,y1]], landscape.ground[tone]);
-          polygon([[x1,y0],[x2,y1],[x3,y1]], landscape.ground[(tone + 1 + row % 2) % landscape.ground.length]);
-        }
+      const vanishingX = width / 2 + Math.sin(heading) * width * .48;
+      const farWidth = width * 4.5;
+      const forwardOffset = (distance * .018) % 1;
+      ctx.lineWidth = 1;
+
+      // Lines parallel to the direction of travel converge at the horizon.
+      for (let column = -24; column <= 24; column++) {
+        const endX = width / 2 + column * farWidth / 24;
+        const major = column % 4 === 0;
+        ctx.strokeStyle = major ? 'rgba(151,255,219,.48)' : 'rgba(151,255,219,.20)';
+        ctx.lineWidth = major ? 1.5 : 1;
+        ctx.beginPath(); ctx.moveTo(vanishingX, groundTop); ctx.lineTo(endX, height + 2); ctx.stroke();
       }
-    }
 
-    function drawRoute(horizon) {
-      const top = horizon + 38;
-      const bend = (Math.sin(distance * .0012 + heading) * .14 + landscape.waterBend) * width;
-      const center = width * landscape.waterX;
-      const half = landscape.waterWidth * width * .5;
-      if (landscape.feature === 'river') {
-        polygon([[center-4,top],[center+5,top],[center+half+bend,height],[center-half+bend,height]], 'rgba(43,126,154,.88)');
-        polygon([[center-1,top],[center+2,top],[center+half*.32+bend,height],[center-half*.32+bend,height]], 'rgba(137,213,215,.58)');
-      } else {
-        polygon([[center-3,top],[center+3,top],[center+half*.42+bend,height],[center-half*.42+bend,height]], 'rgba(213,190,140,.9)');
-        ctx.save(); ctx.setLineDash([18, 22]); ctx.lineWidth = 3; ctx.strokeStyle = 'rgba(255,240,190,.75)';
-        ctx.beginPath(); ctx.moveTo(center, top); ctx.lineTo(center+bend, height); ctx.stroke(); ctx.restore();
+      // Exponential spacing gives a large flat plane with continuous forward motion.
+      for (let row = 0; row < 34; row++) {
+        const depth = (row + forwardOffset) / 34;
+        const eased = depth * depth * depth;
+        const y = groundTop + (height - groundTop) * eased;
+        const major = row % 5 === 0;
+        ctx.strokeStyle = major ? 'rgba(151,255,219,.52)' : 'rgba(151,255,219,.22)';
+        ctx.lineWidth = major ? 1.6 : 1;
+        ctx.beginPath(); ctx.moveTo(-width * 2, y); ctx.lineTo(width * 3, y); ctx.stroke();
       }
+
+      ctx.strokeStyle = 'rgba(224,255,241,.72)';
+      ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.moveTo(-width, groundTop); ctx.lineTo(width * 2, groundTop); ctx.stroke();
     }
 
     function drawAircraft() {
@@ -208,22 +173,41 @@
       ctx.restore();
     }
 
+    function syncAltitudeToBoard(now) {
+      const metres = Math.round(altitude);
+      if (metres === lastAltitudeSent || now - lastAltitudeSentAt < 200) return;
+      lastAltitudeSent = metres;
+      lastAltitudeSentAt = now;
+      fetch('/api/flight/altitude', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({altitude: metres})
+      }).catch(() => {});
+    }
+
     function frame(now) {
       const dt = Math.min(.04, (now - last) / 1000); last = now;
-      if (!clutchActive) { targetRoll *= Math.pow(.06, dt); targetPitch *= Math.pow(.06, dt); }
+      const orientationLive = orientationCalibrated && now - orientationAt < 350;
+      if (!orientationLive) {
+        targetRoll *= Math.pow(.18, dt);
+        targetPitch *= Math.pow(.18, dt);
+        yawControl *= Math.pow(.1, dt);
+      }
       roll = mix(roll, targetRoll, 1 - Math.pow(.012, dt));
       pitch = mix(pitch, targetPitch, 1 - Math.pow(.02, dt));
-      heading = (heading + roll * dt * .28 + Math.PI * 2) % (Math.PI * 2);
+      heading = (heading + (roll * .18 + yawControl * .42) * dt + Math.PI * 2) % (Math.PI * 2);
       altitude = clamp(altitude - pitch * dt * 120, 120, 2400);
-      distance += dt * 78;
+      const speed = pwrPressed ? 62 : bootPressed ? 178 : 120;
+      distance += dt * speed * .65;
 
       const horizon = clamp(height * (.43 - pitch * .28), height*.2, height*.68);
       ctx.save(); ctx.translate(width/2, height/2); ctx.rotate(-roll*.18); ctx.translate(-width/2,-height/2);
-      drawSky(horizon); drawMountains(horizon); drawTerrain(horizon); drawRoute(horizon); ctx.restore();
+      drawSky(horizon); drawGrid(horizon); ctx.restore();
       drawAircraft();
       document.querySelector('#altitude').textContent = `${Math.round(altitude)} m`;
-      document.querySelector('#speed').textContent = `${Math.round(120 + Math.abs(pitch)*18)} kt`;
+      document.querySelector('#speed').textContent = `${Math.round(speed + Math.abs(pitch)*18)} kt`;
       document.querySelector('#heading').textContent = `${String(Math.round(heading * 180 / Math.PI) % 360).padStart(3,'0')}°`;
+      syncAltitudeToBoard(now);
       canvas.dataset.roll = roll.toFixed(3);
       canvas.dataset.pitch = pitch.toFixed(3);
       requestAnimationFrame(frame);
@@ -234,32 +218,31 @@
     source.onerror = () => { const badge = document.querySelector('#serial'); badge.textContent = 'USB reconnecting'; badge.className = 'badge'; };
     source.onmessage = event => {
       const data = JSON.parse(event.data);
-      if (data.type === 'cursor') steer(Number(data.dx), Number(data.dy));
+      if (data.type === 'cursor' && !orientationCalibrated) steer(Number(data.dx), Number(data.dy));
+      if (data.type === 'orientation') setOrientation(data);
       if (data.type === 'airmouse') {
-        setClutch(data.clutch || 'idle');
-        const gyro = document.querySelector('#gyro');
-        gyro.textContent = data.calibrated ? 'Gyro calibrated' : 'Keep board still';
-        gyro.className = `badge ${data.calibrated ? 'live' : ''}`;
+        setButtons(data);
+        if (!data.calibrated) {
+          const gyro = document.querySelector('#gyro');
+          gyro.textContent = 'Keep board still';
+          gyro.className = 'badge';
+        }
       }
     };
 
     const keys = new Set();
     window.addEventListener('keydown', event => {
       if (!event.key.startsWith('Arrow')) return;
-      event.preventDefault(); keys.add(event.key); clutchActive = true;
+      event.preventDefault(); keys.add(event.key);
       if (event.key === 'ArrowLeft') targetRoll -= .09;
       if (event.key === 'ArrowRight') targetRoll += .09;
       if (event.key === 'ArrowUp') targetPitch -= .065;
       if (event.key === 'ArrowDown') targetPitch += .065;
       targetRoll = clamp(targetRoll, -.95, .95); targetPitch = clamp(targetPitch, -.52, .52);
     });
-    window.addEventListener('keyup', event => {
-      keys.delete(event.key);
-      if (![...keys].some(key => key.startsWith('Arrow')) && !document.querySelector('#clutch').classList.contains('active')) clutchActive = false;
-    });
+    window.addEventListener('keyup', event => keys.delete(event.key));
 
-    document.querySelector('#regenerate').onclick = generateLandscape;
-    window.addEventListener('resize', resize); generateLandscape(); resize(); requestAnimationFrame(frame);
+    window.addEventListener('resize', resize); resize(); requestAnimationFrame(frame);
   </script>
 </body>
 </html>

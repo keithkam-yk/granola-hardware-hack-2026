@@ -42,8 +42,8 @@ class EventBrokerTests(unittest.TestCase):
     def test_publishes_airmouse_state_and_keeps_it_in_snapshot(self) -> None:
         broker = EventBroker()
         state = {
-            "type": "airmouse", "ble": "connected", "clutch": "active",
-            "calibrated": True, "touch": True, "sensitivity": 0.18,
+            "type": "airmouse", "ble": "connected", "tracking": True,
+            "calibrated": True, "pwr": False, "boot": True, "sensitivity": 0.18,
         }
         broker.publish_airmouse(state)
         self.assertEqual(broker.snapshot()["airmouse"], state)
@@ -52,22 +52,47 @@ class EventBrokerTests(unittest.TestCase):
 class DeviceEventTests(unittest.TestCase):
     def test_parses_airmouse_state(self) -> None:
         state = parse_device_event(
-            b'{"type":"airmouse","ble":"advertising","clutch":"idle"}'
+            b'{"type":"airmouse","ble":"advertising","tracking":true,'
+            b'"pwr":false,"boot":true}'
         )
         self.assertIsNotNone(state)
         assert state is not None
         self.assertEqual(state["ble"], "advertising")
+        self.assertTrue(state["tracking"])
+        self.assertTrue(state["boot"])
 
     def test_parses_relative_cursor_movement(self) -> None:
         event = parse_device_event(
-            b'{"type":"cursor","dx":-3,"dy":7,"mode":"laser"}'
+            b'{"type":"cursor","dx":-3,"dy":7,"mode":"boot",'
+            b'"pwr":false,"boot":true}'
         )
         self.assertEqual(
-            event, {"type": "cursor", "dx": -3, "dy": 7, "mode": "laser"}
+            event, {
+                "type": "cursor", "dx": -3, "dy": 7, "mode": "boot",
+                "pwr": False, "boot": True,
+            }
         )
 
     def test_rejects_cursor_event_without_numeric_deltas(self) -> None:
         self.assertIsNone(parse_device_event(b'{"type":"cursor","dx":"left"}'))
+
+    def test_parses_calibrated_orientation(self) -> None:
+        event = parse_device_event(
+            b'{"type":"orientation","step":"done","calibrated":true,'
+            b'"roll":12.5,"pitch":-8.0,"yaw":31.0,'
+            b'"rollNorm":0.3,"pitchNorm":-0.2,"yawNorm":0.6}'
+        )
+        self.assertIsNotNone(event)
+        assert event is not None
+        self.assertTrue(event["calibrated"])
+        self.assertAlmostEqual(event["yawNorm"], 0.6)
+
+    def test_rejects_orientation_without_numeric_angles(self) -> None:
+        self.assertIsNone(
+            parse_device_event(
+                b'{"type":"orientation","roll":"right","pitch":0,"yaw":0}'
+            )
+        )
 
     def test_ignores_samples_logs_and_invalid_json(self) -> None:
         self.assertIsNone(parse_device_event(b'{"seq":1}'))
@@ -76,7 +101,11 @@ class DeviceEventTests(unittest.TestCase):
 
 
 class FakeReader:
-    def send_command(self, _command: str) -> bool:
+    def __init__(self) -> None:
+        self.commands: list[str] = []
+
+    def send_command(self, command: str) -> bool:
+        self.commands.append(command)
         return True
 
 
@@ -92,11 +121,12 @@ class FakeDoodlePredictor:
 class DashboardServerTests(unittest.TestCase):
     def setUp(self) -> None:
         index_path = Path(__file__).parents[1] / "web" / "index.html"
+        self.reader = FakeReader()
         self.server = DashboardServer(
             ("127.0.0.1", 0),
             index_path,
             EventBroker(),
-            FakeReader(),  # type: ignore[arg-type]
+            self.reader,  # type: ignore[arg-type]
             FakeDoodlePredictor(),  # type: ignore[arg-type]
         )
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
@@ -132,6 +162,32 @@ class DashboardServerTests(unittest.TestCase):
         self.assertEqual(response.status, 200)
         self.assertEqual(payload["model"], "fake/quickdraw")
         self.assertEqual(payload["predictions"][0]["label"], "cat")
+
+    def test_sends_flight_altitude_to_board(self) -> None:
+        body = json.dumps({"altitude": 937})
+        self.connection.request(
+            "POST",
+            "/api/flight/altitude",
+            body=body,
+            headers={"Content-Type": "application/json"},
+        )
+        response = self.connection.getresponse()
+        self.assertEqual(response.status, 200)
+        self.assertEqual(json.loads(response.read()), {"ok": True})
+        self.assertEqual(self.reader.commands, ["ALT 937"])
+
+    def test_rejects_out_of_range_flight_altitude(self) -> None:
+        body = json.dumps({"altitude": 9999})
+        self.connection.request(
+            "POST",
+            "/api/flight/altitude",
+            body=body,
+            headers={"Content-Type": "application/json"},
+        )
+        response = self.connection.getresponse()
+        response.read()
+        self.assertEqual(response.status, 400)
+        self.assertEqual(self.reader.commands, [])
 
 
 if __name__ == "__main__":

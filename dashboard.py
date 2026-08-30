@@ -33,6 +33,8 @@ from doodle_demo.predictor import (
 SAMPLE_FIELDS = ("seq", "t", "ax", "ay", "az", "gx", "gy", "gz", "temp")
 SENSITIVITY_MIN = 0.05
 SENSITIVITY_MAX = 0.80
+FLIGHT_ALTITUDE_MIN = 120
+FLIGHT_ALTITUDE_MAX = 2400
 MAX_DOODLE_IMAGE_BYTES = 2 * 1024 * 1024
 DOODLE_IMAGE_TYPES = {"image/png", "image/jpeg"}
 
@@ -81,11 +83,17 @@ def parse_device_event(line: bytes) -> dict[str, Any] | None:
         payload = json.loads(line.decode("utf-8").strip())
     except (UnicodeDecodeError, json.JSONDecodeError):
         return None
-    if not isinstance(payload, dict) or payload.get("type") not in {"airmouse", "cursor"}:
+    if not isinstance(payload, dict) or payload.get("type") not in {
+        "airmouse", "cursor", "orientation",
+    }:
         return None
     if payload["type"] == "cursor":
         dx, dy = payload.get("dx"), payload.get("dy")
         if not isinstance(dx, (int, float)) or not isinstance(dy, (int, float)):
+            return None
+    if payload["type"] == "orientation":
+        angles = (payload.get("roll"), payload.get("pitch"), payload.get("yaw"))
+        if not all(isinstance(value, (int, float)) for value in angles):
             return None
     return payload
 
@@ -278,6 +286,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if route == "/api/doodle/predict":
             self._predict_doodle()
             return
+        if route == "/api/flight/altitude":
+            self._set_flight_altitude()
+            return
         if route != "/settings":
             self.send_error(HTTPStatus.NOT_FOUND)
             return
@@ -291,6 +302,24 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self.send_error(HTTPStatus.BAD_REQUEST, "Sensitivity must be between 0.05 and 0.80")
             return
         if not self.dashboard.reader.send_command(f"SENS {sensitivity:.3f}"):
+            self.send_error(HTTPStatus.CONFLICT, "Serial device is not connected")
+            return
+        self._send_bytes("application/json", b'{"ok":true}')
+
+    def _set_flight_altitude(self) -> None:
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+            payload = json.loads(self.rfile.read(length))
+            altitude = int(payload["altitude"])
+            if not FLIGHT_ALTITUDE_MIN <= altitude <= FLIGHT_ALTITUDE_MAX:
+                raise ValueError("altitude out of range")
+        except (ValueError, TypeError, KeyError, json.JSONDecodeError):
+            self.send_error(
+                HTTPStatus.BAD_REQUEST,
+                f"Altitude must be between {FLIGHT_ALTITUDE_MIN} and {FLIGHT_ALTITUDE_MAX} metres",
+            )
+            return
+        if not self.dashboard.reader.send_command(f"ALT {altitude}"):
             self.send_error(HTTPStatus.CONFLICT, "Serial device is not connected")
             return
         self._send_bytes("application/json", b'{"ok":true}')

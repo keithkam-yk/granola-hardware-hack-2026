@@ -36,15 +36,15 @@
     <section class="stage">
       <div class="frame">
         <canvas id="game" width="480" height="270" aria-label="A cozy pixel art room where a cat chases a motion-controlled laser pointer"></canvas>
-        <div class="mode-card"><strong id="prompt">HOLD MOVE OR LASER</strong><br><span id="subprompt">then tilt the controller</span></div>
+        <div class="mode-card"><strong id="prompt">ROTATE TO AIM</strong><br><span id="subprompt">BOOT laser · PWR centers</span></div>
       </div>
     </section>
-    <footer><span><a href="/">sensor lab</a> · <a href="/flight">flight demo</a></span><span>ESP: hold MOVE to aim · hold LASER to make Marmalade chase</span></footer>
+    <footer><span><a href="/">sensor lab</a> · <a href="/flight">flight demo</a></span><span>ESP: rotate to aim · hold BOOT for laser · tap PWR to center</span></footer>
   </main>
   <script>
     const canvas=document.querySelector('#game'),ctx=canvas.getContext('2d'); ctx.imageSmoothingEnabled=false;
     const W=canvas.width,H=canvas.height, pointer={x:340,y:168}, cat={x:146,y:219,vx:0,vy:0,face:1,run:0};
-    let clutch='idle',mode='none',connected=false,calibrated=false,last=performance.now(),pounce=0,blink=0,mouseFallback=false;
+    let bootPressed=false,pwrPressed=false,connected=false,calibrated=false,last=performance.now(),pounce=0,blink=0,mouseFallback=false;
     const clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
     function rect(x,y,w,h,c){ctx.fillStyle=c;ctx.fillRect(Math.round(x),Math.round(y),Math.round(w),Math.round(h));}
     function poly(points,c){ctx.fillStyle=c;ctx.beginPath();ctx.moveTo(points[0][0],points[0][1]);for(let i=1;i<points.length;i++)ctx.lineTo(points[i][0],points[i][1]);ctx.closePath();ctx.fill();}
@@ -84,31 +84,30 @@
       ctx.restore();
     }
     function drawPointer(t){
-      const active=clutch==='active';
-      if(mode==='laser'&&active){
+      if(bootPressed){
         const pulse=2+(Math.floor(t/140)%2);rect(pointer.x-pulse,pointer.y-pulse,pulse*2+1,pulse*2+1,'#ff405f');rect(pointer.x-1,pointer.y-1,3,3,'#fff0e8');
-      } else {ctx.strokeStyle=active?'#f3dbad':'#9b8798';ctx.lineWidth=1;ctx.beginPath();ctx.moveTo(pointer.x-6,pointer.y);ctx.lineTo(pointer.x+6,pointer.y);ctx.moveTo(pointer.x,pointer.y-6);ctx.lineTo(pointer.x,pointer.y+6);ctx.stroke();}
+      } else {ctx.strokeStyle=calibrated?'#f3dbad':'#9b8798';ctx.lineWidth=1;ctx.beginPath();ctx.moveTo(pointer.x-6,pointer.y);ctx.lineTo(pointer.x+6,pointer.y);ctx.moveTo(pointer.x,pointer.y-6);ctx.lineTo(pointer.x,pointer.y+6);ctx.stroke();}
     }
     function update(dt,t){
-      const chase=clutch==='active'&&mode==='laser', dx=pointer.x-cat.x,dy=pointer.y-(cat.y-18),dist=Math.hypot(dx,dy);
+      const chase=bootPressed, dx=pointer.x-cat.x,dy=pointer.y-(cat.y-18),dist=Math.hypot(dx,dy);
       if(chase){cat.face=dx<0?-1:1;if(dist>20){cat.vx+=clamp(dx*.9,-80,80)*dt;cat.vx*=Math.pow(.05,dt);cat.x+=cat.vx*dt;if(pointer.y<180&&dist<105&&pounce<=0)pounce=.5;}else cat.vx*=Math.pow(.02,dt);}
       else{cat.vx*=Math.pow(.025,dt);cat.x+=cat.vx*dt;}
       if(pounce>0){pounce-=dt;cat.y=219-Math.sin((.5-pounce)/.5*Math.PI)*24;}else cat.y=219;
       cat.x=clamp(cat.x,32,W-34);cat.run+=Math.abs(cat.vx)*dt;
       if(Math.random()<dt*.25)blink=.12;blink=Math.max(0,blink-dt);
-      canvas.dataset.mode=mode;canvas.dataset.clutch=clutch;canvas.dataset.pointerX=Math.round(pointer.x);canvas.dataset.pointerY=Math.round(pointer.y);canvas.dataset.catX=Math.round(cat.x);
+      canvas.dataset.boot=String(bootPressed);canvas.dataset.pwr=String(pwrPressed);canvas.dataset.pointerX=Math.round(pointer.x);canvas.dataset.pointerY=Math.round(pointer.y);canvas.dataset.catX=Math.round(cat.x);
       document.querySelector('#usb').textContent=connected?'USB live':'USB waiting';document.querySelector('#usb').className='chip '+(connected?'live':'');
       document.querySelector('#gyro').textContent=calibrated?'gyro ready':'keep still';document.querySelector('#gyro').className='chip '+(calibrated?'live':'');
-      const modeChip=document.querySelector('#mode');modeChip.textContent=clutch==='active'?(mode==='laser'?'laser active':'move active'):(clutch==='arming'?'hold…':'buttons idle');modeChip.className='chip '+(mode==='laser'&&clutch==='active'?'laser':clutch==='active'?'live':'');
-      document.querySelector('#prompt').textContent=chase?'LASER ON · CHASE!':clutch==='active'?'POINTER MOVING':'HOLD MOVE OR LASER';
-      document.querySelector('#subprompt').textContent=chase?'Marmalade sees it':clutch==='active'?'cat stays cozy':'then tilt the controller';
+      const modeChip=document.querySelector('#mode');modeChip.textContent=bootPressed?'BOOT · laser':pwrPressed?'PWR · centered':'motion live';modeChip.className='chip '+(bootPressed?'laser':calibrated?'live':'');
+      document.querySelector('#prompt').textContent=chase?'BOOT · CHASE!':'ROTATE TO AIM';
+      document.querySelector('#subprompt').textContent=chase?'Marmalade sees it':'BOOT laser · PWR centers';
     }
     function frame(t){const dt=Math.min(.04,(t-last)/1000);last=t;update(dt,t);drawRoom(t);drawCat(t);drawPointer(t);requestAnimationFrame(frame);}requestAnimationFrame(frame);
     const events=new EventSource('/events');
-    events.onmessage=e=>{const d=JSON.parse(e.data);if(d.type==='status'){connected=d.status.startsWith('Connected');return;}if(d.type==='airmouse'){mode=d.mode||'none';clutch=d.clutch||'idle';calibrated=!!d.calibrated;return;}if(d.type==='cursor'){mode=d.mode||mode;pointer.x=clamp(pointer.x+d.dx*1.6,8,W-8);pointer.y=clamp(pointer.y+d.dy*1.6,18,H-18);}};
+    events.onmessage=e=>{const d=JSON.parse(e.data);if(d.type==='status'){connected=d.status.startsWith('Connected');return;}if(d.type==='airmouse'){if(d.pwr&&!pwrPressed){pointer.x=W/2;pointer.y=H/2}bootPressed=!!d.boot;pwrPressed=!!d.pwr;calibrated=!!d.calibrated;return;}if(d.type==='cursor'){pointer.x=clamp(pointer.x+d.dx*1.6,8,W-8);pointer.y=clamp(pointer.y+d.dy*1.6,18,H-18);}};
     events.onerror=()=>connected=false;
     function localPoint(e){const r=canvas.getBoundingClientRect();pointer.x=(e.clientX-r.left)*W/r.width;pointer.y=(e.clientY-r.top)*H/r.height;}
-    canvas.addEventListener('pointermove',e=>{if(mouseFallback)localPoint(e)});canvas.addEventListener('pointerdown',e=>{mouseFallback=true;localPoint(e);mode='laser';clutch='active';canvas.setPointerCapture(e.pointerId)});canvas.addEventListener('pointerup',()=>{clutch='idle';mode='none'});canvas.addEventListener('pointercancel',()=>{clutch='idle';mode='none'});
+    canvas.addEventListener('pointermove',e=>{if(mouseFallback)localPoint(e)});canvas.addEventListener('pointerdown',e=>{mouseFallback=true;localPoint(e);bootPressed=true;canvas.setPointerCapture(e.pointerId)});canvas.addEventListener('pointerup',()=>bootPressed=false);canvas.addEventListener('pointercancel',()=>bootPressed=false);
   </script>
 </body>
 </html>

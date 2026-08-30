@@ -144,13 +144,13 @@
 
     <section class="panel airmouse" id="airmousePanel">
       <div class="airmouse-copy">
-        <h2>Touch-clutched air mouse</h2>
-        <p>Pair <strong>QMI8658 Air Mouse</strong> in Bluetooth settings. Hold the board’s screen for 120 ms, then rotate your wrist to move. Lift to freeze and recenter. Taps never click.</p>
+        <h2>Always-on air mouse</h2>
+        <p>Pair <strong>QMI8658 Air Mouse</strong> in Bluetooth settings, then rotate your wrist to move at any time. Physical BOOT and PWR presses are available as demo actions; neither creates a desktop click.</p>
         <div class="airmouse-state">
           <span class="badge" id="bleBadge">BLE waiting</span>
           <span class="badge" id="calBadge">Calibrating</span>
-          <span class="badge" id="touchBadge">Touch checking</span>
-          <span class="badge" id="clutchBadge">Clutch idle</span>
+          <span class="badge" id="bootBadge">BOOT</span>
+          <span class="badge" id="pwrBadge">PWR</span>
         </div>
       </div>
       <div class="sensitivity">
@@ -163,14 +163,14 @@
 
     <section class="panel pointer-demo">
       <div class="pointer-heading">
-        <div><h2>Live pointer playground</h2><p>Hold the board’s touchscreen, then rotate the controller. No Bluetooth pairing required here.</p></div>
+        <div><h2>Live pointer playground</h2><p>Rotate the controller whenever you like. No Bluetooth pairing required here.</p></div>
         <button id="resetPointer">Center pointer</button>
       </div>
       <div class="pointer-field" id="pointerField">
         <div class="demo-cursor" id="demoCursor" aria-hidden="true">
           <svg viewBox="0 0 34 43"><path d="M3 2v31l8.2-7.1 6.1 13.4 6.7-3-6-13.1 11.1-.4L3 2Z" fill="#f7fbff" stroke="#090d14" stroke-width="2.4" stroke-linejoin="round"/></svg>
         </div>
-        <div class="pointer-hint" id="pointerHint">Hold the touchscreen, then rotate</div>
+        <div class="pointer-hint" id="pointerHint">Keep still for calibration</div>
       </div>
     </section>
 
@@ -278,22 +278,21 @@
     function updateAirMouse(state) {
       const ble = document.querySelector('#bleBadge');
       const calibrated = document.querySelector('#calBadge');
-      const touch = document.querySelector('#touchBadge');
-      const clutch = document.querySelector('#clutchBadge');
+      const boot = document.querySelector('#bootBadge');
+      const pwr = document.querySelector('#pwrBadge');
       ble.textContent = state.ble === 'connected' ? 'BLE connected' : 'BLE advertising';
       ble.className = `badge ${state.ble === 'connected' ? 'good' : ''}`;
       calibrated.textContent = state.calibrated ? 'Gyro calibrated' : 'Keep board still';
       calibrated.className = `badge ${state.calibrated ? 'good' : ''}`;
-      touch.textContent = state.touch ? 'Touch ready' : 'Touch unavailable';
-      touch.className = `badge ${state.touch ? 'good' : ''}`;
-      const clutchLabel = state.clutch === 'active' ? 'Clutch active' : state.clutch === 'arming' ? 'Hold…' : 'Clutch idle';
-      clutch.textContent = clutchLabel;
-      clutch.className = `badge ${state.clutch === 'active' ? 'active' : ''}`;
+      boot.textContent = state.boot ? 'BOOT pressed' : 'BOOT';
+      boot.className = `badge ${state.boot ? 'active' : ''}`;
+      pwr.textContent = state.pwr ? 'PWR pressed' : 'PWR';
+      pwr.className = `badge ${state.pwr ? 'active' : ''}`;
       const pointerField = document.querySelector('#pointerField');
-      pointerField.classList.toggle('active', state.clutch === 'active');
-      document.querySelector('#pointerHint').textContent = state.clutch === 'active'
-        ? 'Moving — lift your finger to freeze'
-        : state.clutch === 'arming' ? 'Keep holding…' : 'Hold the touchscreen, then rotate';
+      pointerField.classList.toggle('active', !!state.calibrated);
+      document.querySelector('#pointerHint').textContent = state.calibrated
+        ? 'Motion live · rotate the controller'
+        : 'Keep still for calibration';
       if (Number.isFinite(state.sensitivity)) {
         document.querySelector('#sensitivity').value = state.sensitivity;
         document.querySelector('#sensitivityValue').value = Number(state.sensitivity).toFixed(2);
