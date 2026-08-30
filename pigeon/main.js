@@ -274,9 +274,26 @@ function headingVector() {
 // angles come out of asin about that pose, so level reads zero and nothing
 // crosses a discontinuity short of 90 degrees, which no pigeon reaches.
 
-const LEVEL_DEFAULT = [-1, 0, 0];    // ax, ay, az held level
-const SCREEN_RIGHT = [0, 1, 0];      // device +y, from the panel's 270 rotation
+// The measured frame, from the dogfight controller's calibration.json rather
+// than derived from how the panel is rotated. Deriving it was wrong twice —
+// the second time inverted, which is what made roll snap between +180 and -180
+// — and an earlier version of this file then used a third wrong value taken
+// from game.html, reading roll and pitch off the wrong axes entirely.
+//
+//   {"up": [0,0,-1], "right": [1,0,0], "forward": [0,1,0]}
+//
+// So screen-up is -az, screen-right is +ax, and forward is +ay. These are only
+// the defaults: pressing C stores whatever pose the board is actually in.
+const LEVEL_DEFAULT = [0, 0, -1];
+const SCREEN_RIGHT = [1, 0, 0];
 const TILT_SPAN = 38;                // degrees of tilt for full deflection
+
+// Tilt the board back and the bird climbs, like pulling a stick. The measured
+// frame reports that as a negative angle, so it is flipped here rather than by
+// quietly reordering the cross product — one constant, one character to change
+// if it turns out to read backwards in the hand.
+const BOARD_PITCH_SIGN = -1;
+const BOARD_ROLL_SIGN = 1;
 
 const dot3 = (a, b) => a[0]*b[0] + a[1]*b[1] + a[2]*b[2];
 const unit3 = a => { const n = Math.hypot(a[0],a[1],a[2]) || 1; return [a[0]/n, a[1]/n, a[2]/n]; };
@@ -286,7 +303,9 @@ function frameFrom(level) {
   const up = unit3(level);
   const k = dot3(SCREEN_RIGHT, up);
   const right = unit3([SCREEN_RIGHT[0]-up[0]*k, SCREEN_RIGHT[1]-up[1]*k, SCREEN_RIGHT[2]-up[2]*k]);
-  return { up, right, forward: cross3(up, right) };
+  // cross(right, up), not cross(up, right): the other order gives -forward,
+  // which reads as pitch inverted.
+  return { up, right, forward: cross3(right, up) };
 }
 const asDegrees = v => Math.asin(MathUtils.clamp(v, -1, 1)) * 180 / Math.PI;
 
@@ -301,8 +320,8 @@ const board = {
 function readTilt(sample) {
   const gravity = unit3([sample[2], sample[3], sample[4]]);
   return {
-    roll: asDegrees(dot3(gravity, board.frame.right)) / TILT_SPAN,
-    pitch: asDegrees(dot3(gravity, board.frame.forward)) / TILT_SPAN,
+    roll: BOARD_ROLL_SIGN * asDegrees(dot3(gravity, board.frame.right)) / TILT_SPAN,
+    pitch: BOARD_PITCH_SIGN * asDegrees(dot3(gravity, board.frame.forward)) / TILT_SPAN,
   };
 }
 
